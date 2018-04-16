@@ -24,7 +24,7 @@ class PopCode():
 
         if space is None:
             # assume 360 deg periodic coverage in each dimension
-            space = [(0, 2 * np.pi) for _ in shape]
+            space = [(-np.pi, np.pi) for _ in shape]
             # assume preferred stimuli are evenly spaced across range
             self._prefs = [np.linspace(*r, p + 1)[:-1]
                            for r, p in zip(space, shape)]
@@ -58,6 +58,29 @@ class PopCode():
     @property
     def prefs(self):
         return self._prefs
+
+
+class RecurrentPopCode(PopCode):
+    """
+    TODO:
+       * weight_func same number of dimensions as pop code (1D only currently)
+    """
+    def __init__(self, weight_func, S, mu, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._weight_func = np.vectorize(weight_func)
+        self.set_weights()
+
+        self._S = S
+        self._mu = mu
+
+    def set_weights(self):
+        shape = [self._prefs[0].shape[0]] * 2
+        self._w = self._weight_func(*np.indices(shape))
+
+    def step(self):
+        u = np.matmul(self._w, self.activity)
+        u_sq = u ** 2
+        self.activity = u_sq / (self._S + self._mu * np.sum(u_sq))
 
 
 class KalmanBasisNetwork:

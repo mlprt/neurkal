@@ -46,8 +46,6 @@ class PopCode():
         self._act_func = lambda x: [self.act_func(x, x_i)
                                     for x_i in self._prefs[0]]
 
-        self._lock = threading.Lock()
-
     def __call__(self, x):
         self.mean_activity = self._act_func(x)
         self.activity = self.dist(self.mean_activity)
@@ -62,20 +60,68 @@ class PopCode():
         return self._prefs
 
 
-class KalmanBasisNetwork():
+class KalmanBasisNetwork:
 
-    def __init__(self, sensory_inputs, motor_inputs):
+    def __init__(self, sensory_inputs, motor_inputs, mu, eta):
         """
         Args:
             sensory_inputs (PopCode):
             motor_inputs (PopCode):
         """
         shape = [len(l) for l in sensory_inputs + motor_inputs]
-        motor_start = len(sensory_inputs)
+        # for identifying control variables
+        self._control_idx = len(sensory_inputs)
         # TODO: use np.indices?
         self.prefs = np.fromfunction(lambda *args: np.dstack(args), shape)
+        self.prefs = self.prefs.astype(int)
+
         self.act = np.zeros(shape)
+
+        # divisive normalization parameters
+        self._mu = mu
+        self._eta = eta
+        self.set_weights()  # (mu, eta)
 
     def update(self):
         # self.act =
+        for idx in self.prefs:
+            self.act[idx] = 0
+
+    def h_i(self):
         pass
+
+    def set_weights(self):
+        pass
+
+
+class KalmanFilter:
+
+    def __init__(self, M, B, Z, sigma_0=1e12):
+        self._M = M
+        self._B = B
+        self._Z = Z
+        self._I = np.eye(1)
+        self._sigma = sigma_0  # (prior) estimate covariance
+        self._q = 0  # covariance of feedback estimates, Q
+        self._gain = 0  # kalman gain, K
+
+    def step(self):
+        # TODO: proper matrix multiplication in these routines
+        self._update_gain()
+        self._update_estimate(0.0)
+        self._update_sigma()
+
+    def _update_gain(self):
+        self._gain = self._sigma * np.linalg.inv(self._sigma + self._q)
+
+    def _update_sigma(self):
+        gain = self._gain
+        gain_sub = self._I - self._gain
+        self._sigma = self._M * (gain_sub * self._sigma * gain_sub.T
+                                 + gain * self._Q * gain.T) * self._M.T
+        self._sigma += self._Z
+
+    def _update_estimate(self, c, x_s):
+        self._estimate = (self._I - self._gain) * (self._M * self._estimate
+                                                   + self._B * c)
+        self._estimate += self._gain * x_s

@@ -2,7 +2,7 @@ from math import exp
 import threading
 
 import numpy as np
-
+from scipy.misc import derivative
 
 class PopCode():
     def __init__(self, shape, act_func, dist, space=None):
@@ -46,18 +46,31 @@ class PopCode():
         self._act_func = lambda x: [self.act_func(x, x_i)
                                     for x_i in self._prefs[0]]
 
-    def __call__(self, x):
+    def __call__(self, x, cr_bound=True):
         self.mean_activity = self._act_func(x)
         self.activity = self.dist(self.mean_activity)
         self.noise = self.activity - self.mean_activity
+        self._calc_cr_bound(x)
         return self.activity
 
     def __len__(self):
         return len(self._prefs[0])
 
+    def _calc_cr_bound(self, x, dx=0.01):
+        fs = [(lambda x_i: (lambda x_: self.act_func(x_, x_i)))(x_i)
+              for x_i in self.prefs[0]]
+        dx_f = np.array([derivative(f, x, dx=dx) for f in fs])
+        q = 1 / np.matmul(np.matmul(dx_f, np.diag(self.mean_activity)), dx_f.T)
+        self._cr_bound = q
+
     @property
     def prefs(self):
         return self._prefs
+
+    @property
+    def cr_bound(self):
+        return self._cr_bound
+
 
 
 class RecurrentPopCode(PopCode):

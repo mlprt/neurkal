@@ -134,13 +134,18 @@ class KalmanBasisNetwork:
     def update(self, sigma):
         """
         TODO:
+            * Pass new state vector
             * Get sigma from Kalman Filter equations
         """
+        # update activation function
         self._calc_h()
+
         # update sensory gains
         for d in range(self._D):
             q = self._all_inputs[d].cr_bound
             self._lambda[d] = sigma[d] / q
+
+        # calculate new activities
         for i in range(self._N):
             idx = self._idx[i]
             S_d = [self._all_inputs[d].activity[idx[d]] for d in range(self._D)]
@@ -149,12 +154,13 @@ class KalmanBasisNetwork:
             self.activity[i] = self._h[i] * f_c + np.dot(self._lambda, S_d)
 
     def _calc_h(self):
+        # normalized activation function for each unit
         self._calc_u()
         for i in range(self._N):
             self._h[i] = self._u[i] / self._u_den
 
     def _calc_u(self):
-        # input to each unit
+        # raw activation for each unit
         self._u = np.zeros(self._N)
         for i, j in product(self._N, repeat=2):
             self._u[i] += self._w[i, j] * self.activity[j]
@@ -193,16 +199,37 @@ class KalmanFilter:
         self._update_sigma()
 
     def _update_gain(self):
-        self._gain = self._sigma * np.linalg.inv(self._sigma + self._q)
+        self._gain = self._sigma @ np.linalg.inv(self._sigma + self._q)
 
     def _update_sigma(self):
         gain = self._gain
         gain_sub = self._I - self._gain
-        self._sigma = self._M * (gain_sub * self._sigma * gain_sub.T
-                                 + gain * self._Q * gain.T) * self._M.T
+        self._sigma = self._M @ (gain_sub @ self._sigma @ gain_sub.T
+                                 + gain @ self._Q @ gain.T) @ self._M.T
         self._sigma += self._Z
 
     def _update_estimate(self, c, x_s):
-        self._estimate = (self._I - self._gain) * (self._M * self._estimate
-                                                   + self._B * c)
+        self._estimate = (self._I - self._gain) @ (self._M @ self._estimate
+                                                   + self._B @ c)
         self._estimate += self._gain * x_s
+
+
+class StateDynamics:
+    def __init__(self, M, B, Z):
+        try:
+            np.hstack([M, B])
+        except ValueError:
+            raise ValueError("Matrices M and B do not have same number of rows")
+        self._M = M
+        self._B = B
+
+        self._Z = Z
+        self._x = np.zeros(M.shape[1])
+
+    def update(self, c):
+        noise = np.random.multivariate_normal(0, self._Z)
+        self._x = self._M @ self._x + self._B @ c + noise
+
+    @property
+    def x(self):
+        return self._x

@@ -215,16 +215,34 @@ class KalmanFilter:
 
 
 class StateDynamics:
-    def __init__(self, M, B, Z):
+    def __init__(self, M, B, Z, x0=None):
         try:
             np.hstack([M, B])
         except ValueError:
             raise ValueError("Matrices M and B do not have same number of rows")
+
+        # dynamical parameter matrices
         self._M = M
         self._B = B
 
+        self._mu = np.zeros(M.shape[1])  # noise mean (0)
+        # noise covariance matrix
+        try:
+            s = Z.shape
+            if len(s) != 2 or s[0] != s[1]:
+                raise ValueError("Covariance matrix Z must be 2D and square")
+        except AttributeError:
+            # an integer was provided
+            Z = [[Z]]
         self._Z = Z
-        self._x = np.zeros(M.shape[1])
+
+        self._x = np.zeros(M.shape[1])  # state vector
+
+        if x0 is not None:
+            try:
+                self._x[:] = x0
+            except ValueError:
+                raise ValueError("Initial state vector is wrong length")
 
     def update(self, c):
         noise = np.random.multivariate_normal(0, self._Z)

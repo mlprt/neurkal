@@ -1,3 +1,4 @@
+from itertools import product
 from math import exp
 import threading
 
@@ -47,6 +48,8 @@ class PopCode():
                                     for x_i in self._prefs[0]]
 
     def __call__(self, x, cr_bound=True):
+        # TODO: better naming? e.g. activity changes with recurrent connections
+        # but mean_activity and noise are based on input
         self.mean_activity = self._act_func(x)
         self.activity = self.dist(self.mean_activity)
         self.noise = self.activity - self.mean_activity
@@ -98,25 +101,32 @@ class RecurrentPopCode(PopCode):
 
 class KalmanBasisNetwork:
 
-    def __init__(self, sensory_inputs, motor_inputs, mu, eta):
+    def __init__(self, sensory_inputs, motor_inputs, M, B, K_w=3, mu=0.0,
+                 eta=0.002):
         """
         Args:
             sensory_inputs (PopCode):
             motor_inputs (PopCode):
-        """
-        shape = [len(l) for l in sensory_inputs + motor_inputs]
-        # for identifying control variables
-        self._control_idx = len(sensory_inputs)
-        # TODO: use np.indices?
-        self.prefs = np.fromfunction(lambda *args: np.dstack(args), shape)
-        self.prefs = self.prefs.astype(int)
 
-        self.act = np.zeros(shape)
+        TODO:
+            * pass KalmanFilter rather than M, B?
+        """
+        self._D, self._C = len(sensory_inputs), len(motor_inputs)
+        self._all_inputs = sensory_inputs + motor_inputs
+        shape = [len(l) for l in self._all_inputs]
+        self._N = np.prod(shape)
+        # indices for referring to input units
+        self._idx = np.array(np.meshgrid(*[range(n) for n in shape]))
+        self._idx = self._idx.T.reshape(-1, self._D + self._C)
+        # self._prefs contains actual preferences
+        self._set_prefs()
+
+        self.act = np.zeros(self._N)
 
         # divisive normalization parameters
         self._mu = mu
         self._eta = eta
-        self.set_weights()  # (mu, eta)
+        #self.set_weights(K_w, M, B)  # (mu, eta)
 
     def update(self):
         # self.act =
@@ -126,8 +136,20 @@ class KalmanBasisNetwork:
     def h_i(self):
         pass
 
-    def set_weights(self):
-        pass
+    def set_weights(self, K_w, M, B):
+        N = self.prefs.shape[0]
+        L = np.hstack([M, B])
+        self._w = np.zeros((N, N))
+        for i, j in product(self.prefs, 2):
+            dx_d = np.matmul(L, self._prefs[i]) - self._prefs[j]
+            w_raw = np.sum(np.cos(dx) for dx in dx_d) - self._D
+            self._w[i, j] = np.exp(K_w * w_raw)
+
+    def _set_prefs(self):
+        self._prefs = np.zeros((self._N, self._D + self._C))
+        for n in range(self._N):
+            pref_spec = zip(self._all_inputs, self._idx[n])
+            self._prefs[n, :] = [inp._prefs[0][i] for inp, i in pref_spec]
 
 
 class KalmanFilter:

@@ -1,3 +1,5 @@
+from neurkal.utils import colvec
+
 from itertools import product
 from math import exp
 import threading
@@ -120,28 +122,49 @@ class KalmanBasisNetwork:
         self._idx = self._idx.T.reshape(-1, self._D + self._C)
         # self._prefs contains actual preferences
         self._set_prefs()
-
-        self.act = np.zeros(self._N)
+        self._h = np.zeros(self._N)
+        self._lambda = np.zeros(self._D)  # TODO: prior gains?
+        self.activity = np.zeros(self._N)
 
         # divisive normalization parameters
         self._mu = mu
         self._eta = eta
-        #self.set_weights(K_w, M, B)  # (mu, eta)
+        self.set_weights(K_w, M, B)  # (mu, eta)
 
-    def update(self):
-        # self.act =
-        for idx in self.prefs:
-            self.act[idx] = 0
+    def update(self, sigma):
+        """
+        TODO:
+            * Get sigma from Kalman Filter equations
+        """
+        self._calc_h()
+        # update sensory gains
+        for d in range(self._D):
+            q = self._all_inputs[d].cr_bound
+            self._lambda[d] = sigma[d] / q
+        for i in range(self._N):
+            idx = self._idx[i]
+            S_d = [self._all_inputs[d].activity[idx[d]] for d in range(self._D)]
+            # TODO: multiple motor commands...
+            f_c = self._all_inputs[self._D].activity[idx[self._D]]
+            self.activity[i] = self._h[i] * f_c + np.dot(self._lambda, S_d)
 
-    def h_i(self):
-        pass
+    def _calc_h(self):
+        self._calc_u()
+        for i in range(self._N):
+            self._h[i] = self._u[i] / self._u_den
+
+    def _calc_u(self):
+        # input to each unit
+        self._u = np.zeros(self._N)
+        for i, j in product(self._N, repeat=2):
+            self._u[i] += self._w[i, j] * self.activity[j]
+        self._u_den = self._mu + self._eta * np.sum(self._u)
 
     def set_weights(self, K_w, M, B):
-        N = self.prefs.shape[0]
         L = np.hstack([M, B])
-        self._w = np.zeros((N, N))
-        for i, j in product(self.prefs, 2):
-            dx_d = np.matmul(L, self._prefs[i]) - self._prefs[j]
+        self._w = np.zeros((self._N, self._N))
+        for i, j in product(range(self._N), repeat=2):
+            dx_d = np.matmul(L, self._prefs[i]) - self._prefs[j][:self._D]
             w_raw = np.sum(np.cos(dx) for dx in dx_d) - self._D
             self._w[i, j] = np.exp(K_w * w_raw)
 

@@ -13,7 +13,7 @@ class PopCode():
     TODO:
         * non-Poisson CR bounds
     """
-    def __init__(self, shape, act_func, dist, space=None):
+    def __init__(self, n, act_func, dist, space=None):
         """
         Args:
             shape: Network dimensions.
@@ -25,24 +25,11 @@ class PopCode():
         self.act_func = act_func
         self.dist = np.vectorize(dist)
 
-        try:
-            len(shape)
-        except TypeError:
-            shape = [shape]
-
         if space is None:
             # assume 360 deg periodic coverage in each dimension
-            space = [(-np.pi, np.pi) for _ in shape]
+            space = (-np.pi, np.pi)
             # assume preferred stimuli are evenly spaced across range
-            self._prefs = [np.linspace(*r, p + 1)[:-1]
-                           for r, p in zip(space, shape)]
-        else:
-            self._prefs = [np.linspace(*r, p) for r, p in zip(space, shape)]
-            try:
-                self._prefs[0][0]
-            except IndexError:
-                raise ValueError("Network must have non-trivial shape and \
-                                  range of preferred values")
+        self._prefs = np.linspace(*space, n + 1)[:-1]
 
         try:
             # should be a function taking input and preferred input
@@ -52,7 +39,7 @@ class PopCode():
 
         # TODO: multiple dimensions
         self._act_func = lambda x: [self.act_func(x, x_i)
-                                    for x_i in self._prefs[0]]
+                                    for x_i in self._prefs]
 
     def __call__(self, x, cr_bound=True):
         # TODO: better naming? e.g. activity changes with recurrent connections
@@ -64,28 +51,29 @@ class PopCode():
         return self.activity
 
     def __len__(self):
-        return len(self._prefs[0])
+        return len(self._prefs)
 
     def _calc_cr_bound(self, x, dx=0.01):
         fs = [(lambda x_i: (lambda x_: self.act_func(x_, x_i)))(x_i)
-              for x_i in self.prefs[0]]
+              for x_i in self.prefs]
         dx_f = np.array([derivative(f, x, dx=dx) for f in fs])
         q = 1 / (dx_f @ np.diag(self.mean_activity) @ dx_f.T)
         self._cr_bound = q
 
     def readout(self, iterations=100, weight_func=None, S=0, mu=0.002):
         if weight_func is None:
-            weight_func = utils.gaussian_filter(p=len(self._prefs[0]), K_w=1,
+            weight_func = utils.gaussian_filter(p=len(self._prefs), K_w=1,
                                                 delta=0.7)
         recnet = RecurrentPopCode(weight_func=weight_func, S=S, mu=mu,
-                                  shape=len(self._prefs[0]),
+                                  shape=len(self._prefs),
                                   act_func=self.act_func, dist=self.dist)
         recnet.activity = np.copy(self.activity)
         for _ in range(iterations):
+            print(_)
             recnet.step()
 
         # center of mass estimate
-        com = utils.arg_popvector(self.activity, self._prefs[0])
+        com = utils.arg_popvector(self.activity, self._prefs)
         return com
 
     def clear(self):
@@ -110,7 +98,7 @@ class RecurrentPopCode(PopCode):
         super().__init__(*args, **kwargs)
         if normalize:
             # TODO: fix? does not do what I expected...
-            bounds = np.min(self._prefs[0]), np.max(self._prefs[0])
+            bounds = np.min(self._prefs), np.max(self._prefs)
             integral = quad(lambda j: weight_func(0.0, j), *bounds)[0]
         else:
             integral = 1.0
@@ -122,11 +110,11 @@ class RecurrentPopCode(PopCode):
         self._mu = mu
 
     def set_weights(self):
-        shape = [self._prefs[0].shape[0]] * 2
+        shape = [self._prefs.shape[0]] * 2
         self._w = self._weight_func(*np.indices(shape))
 
     def step(self):
-        u = self._w @ self.activity
+        u = self._w @ self.activity.T
         u_sq = u ** 2
         self.activity = u_sq / (self._S + self._mu * np.sum(u_sq))
 
@@ -217,7 +205,7 @@ class KalmanBasisNetwork:
         self._prefs = np.zeros((self._N, self._D + self._C))
         for n in range(self._N):
             pref_spec = zip(self._all_inputs, self._idx[n])
-            self._prefs[n, :] = [inp._prefs[0][i] for inp, i in pref_spec]
+            self._prefs[n, :] = [inp._prefs[i] for inp, i in pref_spec]
 
     def readout(self, iterations=100):
         # store state

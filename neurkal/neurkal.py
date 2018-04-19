@@ -1,4 +1,4 @@
-from neurkal.utils import colvec
+import neurkal.utils as utils
 
 from itertools import product
 from math import exp
@@ -6,8 +6,13 @@ import threading
 
 import numpy as np
 from scipy.misc import derivative
+from scipy.integrate import quad
 
 class PopCode():
+    """
+    TODO:
+        * non-Poisson CR bounds
+    """
     def __init__(self, shape, act_func, dist, space=None):
         """
         Args:
@@ -65,8 +70,26 @@ class PopCode():
         fs = [(lambda x_i: (lambda x_: self.act_func(x_, x_i)))(x_i)
               for x_i in self.prefs[0]]
         dx_f = np.array([derivative(f, x, dx=dx) for f in fs])
-        q = 1 / np.matmul(np.matmul(dx_f, np.diag(self.mean_activity)), dx_f.T)
+        q = 1 / (dx_f @ np.diag(self.mean_activity) @ dx_f.T)
         self._cr_bound = q
+
+    def readout(self, iterations=100, weight_func=None, S=0, mu=0.002):
+        if weight_func is None:
+            weight_func = utils.gaussian_filter(p=len(self._prefs[0]), K_w=1,
+                                                delta=0.7)
+        recnet = RecurrentPopCode(weight_func=weight_func, S=S, mu=mu,
+                                  shape=len(self._prefs[0]),
+                                  act_func=self.act_func, dist=self.dist)
+        recnet.activity = np.copy(self.activity)
+        for _ in range(iterations):
+            recnet.step()
+
+        # center of mass estimate
+        com = utils.arg_popvector(self.activity, self._prefs[0])
+        return com
+
+    def clear(self):
+        self.activity = np.zeros_like(self._prefs)
 
     @property
     def prefs(self):
@@ -83,9 +106,16 @@ class RecurrentPopCode(PopCode):
     TODO:
        * weight_func same number of dimensions as pop code (1D only currently)
     """
-    def __init__(self, weight_func, S, mu, *args, **kwargs):
+    def __init__(self, weight_func, S, mu, normalize=False, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._weight_func = np.vectorize(weight_func)
+        if normalize:
+            # TODO: fix? does not do what I expected...
+            bounds = np.min(self._prefs[0]), np.max(self._prefs[0])
+            integral = quad(lambda j: weight_func(0.0, j), *bounds)[0]
+        else:
+            integral = 1.0
+        weight_func_ = lambda i, j: weight_func(i, j) / integral
+        self._weight_func = np.vectorize(weight_func_)
         self.set_weights()
 
         self._S = S
@@ -96,14 +126,14 @@ class RecurrentPopCode(PopCode):
         self._w = self._weight_func(*np.indices(shape))
 
     def step(self):
-        u = np.matmul(self._w, self.activity)
+        u = self._w @ self.activity
         u_sq = u ** 2
         self.activity = u_sq / (self._S + self._mu * np.sum(u_sq))
 
 
 class KalmanBasisNetwork:
 
-    def __init__(self, sensory_inputs, motor_inputs, M, B, K_w=3, mu=0.0,
+    def __init__(self, sensory_inputs, motor_inputs, M, B, K_w=3, mu=0.01,
                  eta=0.002):
         """
         Args:
@@ -123,27 +153,31 @@ class KalmanBasisNetwork:
         # self._prefs contains actual preferences
         self._set_prefs()
         self._h = np.zeros(self._N)
+        self._sigma = np.eye(self._D)
         self._lambda = np.zeros(self._D)  # TODO: prior gains?
-        self.activity = np.zeros(self._N)
+        self._activity = np.zeros(self._N)
 
         # divisive normalization parameters
         self._mu = mu
         self._eta = eta
-        self.set_weights(K_w, M, B)  # (mu, eta)
+        self._K_w = K_w
+        self.set_weights(K_w, L=np.hstack([M, B]))  # (mu, eta)
 
-    def update(self, sigma):
+    def update(self, sigma=None):
         """
         TODO:
             * Pass new state vector
             * Get sigma from Kalman Filter equations
         """
+        if sigma is not None:
+            self._sigma = sigma
         # update activation function
         self._calc_h()
 
         # update sensory gains
         for d in range(self._D):
             q = self._all_inputs[d].cr_bound
-            self._lambda[d] = sigma[d] / q
+            self._lambda[d] = self._sigma[d] / q
 
         # calculate new activities
         for i in range(self._N):
@@ -151,27 +185,30 @@ class KalmanBasisNetwork:
             S_d = [self._all_inputs[d].activity[idx[d]]
                    for d in range(self._D)]
             # TODO: multiple motor commands...
-            f_c = self._all_inputs[self._D].activity[idx[self._D]]
-            self.activity[i] = self._h[i] * f_c + np.dot(self._lambda, S_d)
+            if self._C:
+                f_c = self._all_inputs[self._D].activity[idx[self._D]]
+            else:
+                f_c = 1
+            self._activity[i] = self._h[i] * f_c + np.dot(self._lambda, S_d)
 
     def _calc_h(self):
         # normalized activation function for each unit
         self._calc_u()
         for i in range(self._N):
-            self._h[i] = self._u[i] / self._u_den
+            self._h[i] = (self._u[i] ** 2) / self._u_den
+
 
     def _calc_u(self):
         # raw activation for each unit
         self._u = np.zeros(self._N)
-        for i, j in product(self._N, repeat=2):
-            self._u[i] += self._w[i, j] * self.activity[j]
-        self._u_den = self._mu + self._eta * np.sum(self._u)
+        for i, j in product(range(self._N), repeat=2):
+            self._u[i] += self._w[i, j] * self._activity[j]
+        self._u_den = self._mu + self._eta * np.sum(self._u ** 2)
 
-    def set_weights(self, K_w, M, B):
-        L = np.hstack([M, B])
+    def set_weights(self, K_w, L):
         self._w = np.zeros((self._N, self._N))
         for i, j in product(range(self._N), repeat=2):
-            dx_d = np.matmul(L, self._prefs[i])
+            dx_d = L @ self._prefs[i]
             dx_d -= self._prefs[j][:self._D]
             w_raw = np.sum(np.cos(dx) for dx in dx_d) - self._D
             self._w[i, j] = np.exp(K_w * w_raw)
@@ -181,6 +218,37 @@ class KalmanBasisNetwork:
         for n in range(self._N):
             pref_spec = zip(self._all_inputs, self._idx[n])
             self._prefs[n, :] = [inp._prefs[0][i] for inp, i in pref_spec]
+
+    def readout(self, iterations=100):
+        # store state
+        activity = np.copy(self._activity)
+        weights = np.copy(self._w)
+
+        # converge on D-dim. stable manifold
+        self.set_weights(self._K_w, L=np.eye(self._D + self._C))
+        for _ in range(iterations):
+            self.update(self._sigma)
+        # center of mass estimate
+        nm = np.zeros(self._D)
+        dm = 0
+        for i in range(self._N):
+            nm += self._activity[i] * self._prefs[i, :self._D]
+            dm += self._activity[i]
+
+        # reset
+        self._w = weights
+        self._activity = activity
+
+        return nm / dm
+        #return self._prefs[np.argmax(self._activity)]
+
+    @property
+    def activity(self):
+        return self._activity
+
+    @property
+    def prefs(self):
+        return self._prefs
 
 
 class KalmanFilter:
@@ -263,7 +331,7 @@ class StateDynamics:
 
     def update(self, c):
         noise = np.random.multivariate_normal(self._mu, self._Z)
-        self._x = self._M @ self._x + self._B @ c + noise
+        self._x = np.ravel(self._M @ self._x + self._B @ c + noise)
 
     @property
     def x(self):

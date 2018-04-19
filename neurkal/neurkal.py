@@ -148,7 +148,8 @@ class KalmanBasisNetwork:
         # calculate new activities
         for i in range(self._N):
             idx = self._idx[i]
-            S_d = [self._all_inputs[d].activity[idx[d]] for d in range(self._D)]
+            S_d = [self._all_inputs[d].activity[idx[d]]
+                   for d in range(self._D)]
             # TODO: multiple motor commands...
             f_c = self._all_inputs[self._D].activity[idx[self._D]]
             self.activity[i] = self._h[i] * f_c + np.dot(self._lambda, S_d)
@@ -170,7 +171,8 @@ class KalmanBasisNetwork:
         L = np.hstack([M, B])
         self._w = np.zeros((self._N, self._N))
         for i, j in product(range(self._N), repeat=2):
-            dx_d = np.matmul(L, self._prefs[i]) - self._prefs[j][:self._D]
+            dx_d = np.matmul(L, self._prefs[i])
+            dx_d -= self._prefs[j][:self._D]
             w_raw = np.sum(np.cos(dx) for dx in dx_d) - self._D
             self._w[i, j] = np.exp(K_w * w_raw)
 
@@ -183,35 +185,57 @@ class KalmanBasisNetwork:
 
 class KalmanFilter:
 
-    def __init__(self, M, B, Z, sigma_0=1e12):
-        self._M = M
-        self._B = B
-        self._Z = Z
-        self._I = np.eye(1)
+    def __init__(self, M, B, Z, sigma_0=None, estimate_0=None):
+        """
+        TODO:
+            * matrix shape checks
+        """
+        self._M = np.array(M)
+        self._B = np.array(B)
+        self._Z = np.array(Z)
+
+        if sigma_0 is None:
+            sigma_0 = [[1e12]]
         self._sigma = sigma_0  # (prior) estimate covariance
-        self._q = 0  # covariance of feedback estimates, Q
-        self._gain = 0  # kalman gain, K
+        self._gain = np.zeros_like(sigma_0)  # kalman gain, K
+        self._I = np.eye(self._gain.shape[0])
 
-    def step(self):
-        # TODO: proper matrix multiplication in these routines
-        self._update_gain()
-        self._update_estimate(0.0)
-        self._update_sigma()
+        if estimate_0 is None:
+            estimate_0 = np.zeros_like(Z)
+        self._estimate = estimate_0
 
-    def _update_gain(self):
-        self._gain = self._sigma @ np.linalg.inv(self._sigma + self._q)
+    def step(self, c, x_s, Q):
+        self._update_gain(Q)
+        self._update_estimate(c, x_s)
+        self._update_sigma(Q)
 
-    def _update_sigma(self):
+    def _update_gain(self, Q):
+        Q = np.array(Q)
+        self._gain = self._sigma @ np.linalg.inv(self._sigma + Q)
+
+    def _update_sigma(self, Q):
         gain = self._gain
         gain_sub = self._I - self._gain
         self._sigma = self._M @ (gain_sub @ self._sigma @ gain_sub.T
-                                 + gain @ self._Q @ gain.T) @ self._M.T
+                                 + gain @ Q @ gain.T) @ self._M.T
         self._sigma += self._Z
 
     def _update_estimate(self, c, x_s):
-        self._estimate = (self._I - self._gain) @ (self._M @ self._estimate
-                                                   + self._B @ c)
+        self._estimate = (self._M @ self._estimate + self._B @ c)
+        self._estimate = (self._I - self._gain) @ self._estimate
         self._estimate += self._gain * x_s
+
+    @property
+    def estimate(self):
+        return self._estimate
+
+    @property
+    def gain(self):
+        return self._gain
+
+    @property
+    def sigma(self):
+        return self._sigma
 
 
 class StateDynamics:
@@ -219,24 +243,17 @@ class StateDynamics:
         try:
             np.hstack([M, B])
         except ValueError:
-            raise ValueError("Matrices M and B do not have same number of rows")
+            raise ValueError("Matrices M and B have different number of rows")
 
         # dynamical parameter matrices
-        self._M = M
-        self._B = B
+        self._M = np.array(M)
+        self._B = np.array(B)
 
-        self._mu = np.zeros(M.shape[1])  # noise mean (0)
+        self._mu = np.zeros(self._M.shape[1])  # noise mean (0)
         # noise covariance matrix
-        try:
-            s = Z.shape
-            if len(s) != 2 or s[0] != s[1]:
-                raise ValueError("Covariance matrix Z must be 2D and square")
-        except AttributeError:
-            # an integer was provided
-            Z = [[Z]]
         self._Z = Z
 
-        self._x = np.zeros(M.shape[1])  # state vector
+        self._x = np.zeros(self._M.shape[1])  # state vector
 
         if x0 is not None:
             try:
@@ -245,7 +262,7 @@ class StateDynamics:
                 raise ValueError("Initial state vector is wrong length")
 
     def update(self, c):
-        noise = np.random.multivariate_normal(0, self._Z)
+        noise = np.random.multivariate_normal(self._mu, self._Z)
         self._x = self._M @ self._x + self._B @ c + noise
 
     @property

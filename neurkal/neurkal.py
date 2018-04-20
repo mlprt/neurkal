@@ -207,7 +207,7 @@ class KalmanBasisNetwork:
         for i, j in product(range(self._N), repeat=2):
             #print('L: ', L, ', prefs: ', prefs[i])
             dx_d = (L @ prefs[i]) - self._prefs[j][:self._D]
-            w_raw = np.sum(np.cos(dx) for dx in dx_d) - self._D
+            w_raw = np.sum(np.cos(np.deg2rad(dx)) for dx in dx_d) - self._D
             self._w[i, j] = np.exp(K_w * w_raw)
         #self._w = self._w.T
 

@@ -227,6 +227,7 @@ class KalmanBasisNetwork:
         for _ in range(iterations):
             self.update(self._sigma)
         # center of mass estimate
+        # TODO: pop. vector? multidimensional?
         nm = np.zeros(self._D)
         dm = 0
         for i in range(self._N):
@@ -274,9 +275,9 @@ class KalmanFilter:
             estimate_0 = np.zeros_like(Z)
         self._estimate = estimate_0
 
-    def step(self, c, x_s, Q):
+    def step(self, c, x_s, Q, kalman_estimate=None):
         self._update_gain(Q)
-        self._update_estimate(c, x_s)
+        self._update_estimate(c=c, x_s=x_s, kalman_estimate=kalman_estimate)
         self._update_sigma(Q)
 
     def _update_gain(self, Q):
@@ -290,8 +291,10 @@ class KalmanFilter:
                                  + gain @ Q @ gain.T) @ self._M.T
         self._sigma += self._Z
 
-    def _update_estimate(self, c, x_s):
-        self._estimate = (self._M @ self._estimate + self._B @ c)
+    def _update_estimate(self, c, x_s, kalman_estimate=None):
+        if kalman_estimate is None:
+            kalman_estimate = np.copy(self._estimate)
+        self._estimate = (self._M @ kalman_estimate + self._B @ c)
         self._estimate = (self._I - self._gain) @ self._estimate
         self._estimate += self._gain @ x_s
 

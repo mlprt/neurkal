@@ -30,7 +30,7 @@ class PopCode():
 
         if space is None:
             # assume 360 deg periodic coverage in each dimension
-            space = (-np.pi, np.pi)
+            space = (-180, 180)
             # assume preferred stimuli are evenly spaced across range
         self._prefs = np.linspace(*space, n + 1)[:-1]
 
@@ -44,13 +44,18 @@ class PopCode():
         self._act_func = lambda x: [self.act_func(x, x_i)
                                     for x_i in self._prefs]
 
-    def __call__(self, x, cr_bound=True):
+    def __call__(self, x, cr_bound=True, certain=False):
         # TODO: better naming? e.g. activity changes with recurrent connections
         # but mean_activity and noise are based on input
         self.mean_activity = self._act_func(x)
-        self.activity = self.dist(self.mean_activity)
-        self.noise = self.activity - self.mean_activity
-        self._calc_cr_bound(x)
+        if certain:
+            self.activity = self.mean_activity
+            self.noise = np.zeros_like(self.activity)
+            self._cr_bound = 1e-12
+        else:
+            self.activity = self.dist(self.mean_activity)
+            self.noise = self.activity - self.mean_activity
+            self._calc_cr_bound(x)
         return self.activity
 
     def __len__(self):
@@ -124,8 +129,8 @@ class RecurrentPopCode(PopCode):
 
 class KalmanBasisNetwork:
 
-    def __init__(self, sensory_inputs, motor_inputs, M, B, K_w=3, mu=0.01,
-                 eta=0.002, prior=None):
+    def __init__(self, sensory_inputs, motor_inputs, M, B, K_w=3, mu=0.001,
+                 eta=0.002, sigma=None, n_var=10):
         """
         Args:
             sensory_inputs (PopCode):
@@ -144,9 +149,12 @@ class KalmanBasisNetwork:
         # self._prefs contains actual preferences
         self._set_prefs()
         self._h = np.zeros(self._N)
-        self._sigma = np.eye(self._D)
+        if sigma is None:
+            sigma = np.ones(self._D)
+        self._sigma = sigma
         self._lambda = np.zeros(self._D)  # TODO: prior gains?
         self._activity = np.zeros(self._N)
+        self._estimates = np.full((n_var, self._D), np.nan)
 
         # divisive normalization parameters
         self._mu = mu
@@ -154,14 +162,11 @@ class KalmanBasisNetwork:
         self._K_w = K_w
         self.set_weights(K_w, L=np.hstack([M, B]))  # (mu, eta)
 
-    def update(self, sigma=None):
+    def update(self, estimate=True):
         """
         TODO:
             * Pass new state vector
-            * Get sigma from Kalman Filter equations
         """
-        if sigma is not None:
-            self._sigma = sigma
         # update activation function
         self._calc_h()
 
@@ -183,12 +188,16 @@ class KalmanBasisNetwork:
             # TODO: multiple motor commands...
             self._activity[i] = self._h[i] * f_c[i] + np.dot(self._lambda, S_d)
 
+        if estimate:
+            self._estimates[:-1, :] = self._estimates[1:, :]
+            self._estimates[-1, :] = self.readout()
+            self._sigma = np.nanvar(self._estimates, axis=0)
+
     def _calc_h(self):
         # normalized activation function for each unit
         self._calc_u()
         for i in range(self._N):
             self._h[i] = (self._u[i] ** 2) / self._u_den
-
 
     def _calc_u(self):
         # raw activation for each unit
@@ -225,7 +234,7 @@ class KalmanBasisNetwork:
         # converge on D-dim. stable manifold
         self.set_weights(self._K_w, L=np.eye(self._D + self._C), readout=True)
         for _ in range(iterations):
-            self.update(self._sigma)
+            self.update(estimate=False)
         # center of mass estimate
         # TODO: pop. vector? multidimensional?
         nm = np.zeros(self._D)
@@ -239,7 +248,6 @@ class KalmanBasisNetwork:
         self._activity = activity
 
         return nm / dm
-        #return self._prefs[np.argmax(self._activity)]
 
     @property
     def activity(self):
@@ -252,6 +260,10 @@ class KalmanBasisNetwork:
     @property
     def lam(self):
         return self._lambda
+
+    @property
+    def estimate(self):
+        return self._estimates[-1]
 
 
 class KalmanFilter:

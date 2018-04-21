@@ -51,7 +51,7 @@ class PopCode():
         if certain:
             self.activity = self.mean_activity
             self.noise = np.zeros_like(self.activity)
-            self._cr_bound = 1e-12
+            self._cr_bound = 1
         else:
             self.activity = self.dist(self.mean_activity)
             self.noise = self.activity - self.mean_activity
@@ -186,6 +186,7 @@ class KalmanBasisNetwork:
             S_d = [self._all_inputs[d].activity[idx[d]]
                    for d in range(self._D)]
             # TODO: multiple motor commands...
+            #print(self._h[i], f_c[i], self._lambda, S_d)
             self._activity[i] = self._h[i] * f_c[i] + np.dot(self._lambda, S_d)
 
         if estimate:
@@ -263,7 +264,7 @@ class KalmanBasisNetwork:
 
     @property
     def estimate(self):
-        return self._estimates[-1]
+        return np.copy(self._estimates[-1])
 
 
 class KalmanFilter:

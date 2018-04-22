@@ -265,6 +265,10 @@ class KalmanBasisNetwork:
     def estimate(self):
         return np.copy(self._estimates[-1])
 
+    @property
+    def weights(self):
+        return np.copy(self._w)
+
 
 class KalmanFilter:
 

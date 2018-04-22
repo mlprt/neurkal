@@ -22,7 +22,7 @@ class PopCode():
             dist: Unit activity distribution given average activity.
         """
 
-        self.act_func = act_func
+        self.act_func = np.vectorize(act_func)
         self.dist = np.vectorize(dist)
         self.activity = np.zeros(n)
         self.mean_activity = np.zeros(n)
@@ -41,8 +41,7 @@ class PopCode():
             raise TypeError("`act` not a function with 2 inputs and 1 output")
 
         # TODO: multiple dimensions
-        self._act_func = lambda x: [self.act_func(x, x_i)
-                                    for x_i in self._prefs]
+        self._act_func = lambda x: self.act_func(x, self._prefs)
 
     def __call__(self, x, cr_bound=True, certain=False):
         # TODO: better naming? e.g. activity changes with recurrent connections
@@ -51,11 +50,11 @@ class PopCode():
         if certain:
             self.activity = self.mean_activity
             self.noise = np.zeros_like(self.activity)
-            self._cr_bound = 1
+            #self._cr_bound = 1
         else:
             self.activity = self.dist(self.mean_activity)
             self.noise = self.activity - self.mean_activity
-            self._calc_cr_bound(x)
+        self._calc_cr_bound(x)
         return self.activity
 
     def __len__(self):
@@ -64,7 +63,7 @@ class PopCode():
     def _calc_cr_bound(self, x, dx=0.01):
         fs = [(lambda x_i: (lambda x_: self.act_func(x_, x_i)))(x_i)
               for x_i in self.prefs]
-        dx_f = np.array([derivative(f, x, dx=dx) for f in fs])
+        dx_f = np.array([derivative(f, x, dx=dx) for f in fs]).T
         q = 1 / (dx_f @ np.diag(self.mean_activity) @ dx_f.T)
         self._cr_bound = q
 
@@ -279,13 +278,13 @@ class KalmanFilter:
         self._Z = np.array(Z)
 
         if sigma_0 is None:
-            sigma_0 = [[1e12]]
+            sigma_0 = np.eye(self._M.shape[1]) * 1e12
         self._sigma = sigma_0  # (prior) estimate covariance
         self._gain = np.zeros_like(sigma_0)  # kalman gain, K
-        self._I = np.eye(self._gain.shape[0])
+        self._I = np.eye(self._gain.shape[1])
 
         if estimate_0 is None:
-            estimate_0 = np.zeros_like(Z)
+            estimate_0 = np.zeros((self._M.shape[1], 1))
         self._estimate = estimate_0
 
     def step(self, c, x_s, Q, kalman_estimate=None):
@@ -300,6 +299,7 @@ class KalmanFilter:
     def _update_sigma(self, Q):
         gain = self._gain
         gain_sub = self._I - self._gain
+        #print(gain, Q, self._M.T)
         self._sigma = self._M @ (gain_sub @ self._sigma @ gain_sub.T
                                  + gain @ Q @ gain.T) @ self._M.T
         self._sigma += self._Z
@@ -307,8 +307,11 @@ class KalmanFilter:
     def _update_estimate(self, c, x_s, kalman_estimate=None):
         if kalman_estimate is None:
             kalman_estimate = np.copy(self._estimate)
+        #print('i: ', self._I, ', g: ', self._gain, ', est: ', self._estimate)
+        #print(self._M @ kalman_estimate, self._B @ c)
         self._estimate = (self._M @ kalman_estimate + self._B @ c)
         self._estimate = (self._I - self._gain) @ self._estimate
+        #print(self._gain, x_s)
         self._estimate += self._gain @ x_s
 
     @property
@@ -339,7 +342,7 @@ class StateDynamics:
         # noise covariance matrix
         self._Z = Z
 
-        self._x = np.zeros(self._M.shape[1])  # state vector
+        self._x = np.zeros((self._M.shape[1], 1))  # state vector
 
         if x0 is not None:
             try:
@@ -348,9 +351,12 @@ class StateDynamics:
                 raise ValueError("Initial state vector is wrong length")
 
     def update(self, c):
-        noise = np.random.multivariate_normal(self._mu, self._Z)
-        self._x = np.ravel(self._M @ self._x + self._B @ c + noise)
+        noise = utils.colvec(np.random.multivariate_normal(self._mu, self._Z))
+        self._x = self._M @ self._x + self._B @ c + noise
 
     @property
     def x(self):
         return self._x
+
+    def change(self, x):
+        self._x = x

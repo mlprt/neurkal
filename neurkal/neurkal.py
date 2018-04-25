@@ -240,7 +240,7 @@ class KalmanBasisNetwork:
             dx_d = (L @ prefs[i]) - self._prefs[j][:self._D]
             w_raw = np.sum(np.cos(np.deg2rad(dx)) for dx in dx_d) - self._D
             self._w[i, j] = np.exp(K_w * w_raw)
-        # self._w = self._w.T
+        self._w = self._w.T
 
     def _set_prefs(self):
         self._prefs = np.zeros((self._N, self._D + self._C))
@@ -248,28 +248,28 @@ class KalmanBasisNetwork:
             pref_spec = zip(self._all_inputs, self._idx[n])
             self._prefs[n, :] = [inp._prefs[i] for inp, i in pref_spec]
 
-    def readout(self, iterations=100):
+    def readout(self, iterations=15):
         # store state
         activity = np.copy(self._activity)
         weights = np.copy(self._w)
 
+        self.readout_activity = np.zeros((iterations, self._N))
+        self.readout_activity[0, :] = self._activity
         # converge on D-dim. stable manifold
         self.set_weights(self._K_w, L=np.eye(self._D + self._C), readout=True)
-        for _ in range(iterations):
+        for i in range(iterations):
             self.update(estimate=False)
+            self.readout_activity[i, :] = self._activity
         # center of mass estimate
         # TODO: pop. vector? multidimensional?
-        nm = np.zeros(self._D)
-        dm = 0
-        for i in range(self._N):
-            nm += self._activity[i] * self._prefs[i, :self._D]
-            dm += self._activity[i]
+        com = utils.arg_popvector(self.readout_activity[-1],
+                                  self._prefs[:, :self._D])
 
         # reset
         self._w = weights
         self._activity = activity
 
-        return nm / dm
+        return com
 
     @property
     def activity(self):

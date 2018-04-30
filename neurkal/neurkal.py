@@ -138,7 +138,8 @@ class KalmanBasisNetwork:
             motor_inputs (PopCode):
 
         TODO:
-            * pass KalmanFilter rather than M, B?
+            * prevent blowups/failures due to bad sensory estimates
+
         """
         self._D, self._C = len(sensory_inputs), len(motor_inputs)
         self._M, self._B, self._Z = np.array(M), np.array(B), np.array(Z)
@@ -261,7 +262,7 @@ class KalmanBasisNetwork:
             self.update(estimate=False)
             self.readout_activity[i, :] = self._activity
         # center of mass estimate
-        # TODO: pop. vector? multidimensional?
+        # TODO:
         com = utils.arg_popvector(self.readout_activity[-1],
                                   self._prefs[:, :self._D])
 

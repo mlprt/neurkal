@@ -6,7 +6,6 @@ from math import exp
 from numba import jit, jitclass
 from numba import int32, float32
 import numpy as np
-from scipy.misc import derivative
 from scipy.integrate import quad
 
 
@@ -27,7 +26,7 @@ class PopCode():
 
         self.act_func = act_func
         self.dist = np.vectorize(dist)
-        self.activity = np.zeros(n)
+        self.activity = np.zeros(n, dtype=np.float64)
         self.mean_activity = np.zeros(n)
         self.noise = np.zeros(n)
 
@@ -36,6 +35,8 @@ class PopCode():
             space = (-180, 180)
             # assume preferred stimuli are evenly spaced across range
         self._prefs = np.linspace(*space, n)
+        self._fs = [(lambda x_i: (lambda x_: self.act_func(x_, x_i)))(x_i)
+                    for x_i in self.prefs]
 
         try:
             # should be a function taking input and preferred input
@@ -56,7 +57,7 @@ class PopCode():
             self.noise = np.zeros_like(self.activity)
             # self._cr_bound = 1
         else:
-            self.activity = self.dist(self.mean_activity)
+            self.activity = self.dist(self.mean_activity).astype(np.float64)
             self.noise = self.activity - self.mean_activity
         self._calc_cr_bound(x)
         return self.activity
@@ -65,11 +66,8 @@ class PopCode():
         return len(self._prefs)
 
     def _calc_cr_bound(self, x, dx=0.01):
-        fs = [(lambda x_i: (lambda x_: self.act_func(x_, x_i)))(x_i)
-              for x_i in self.prefs]
-        dx_f = np.array([derivative(f, x, dx=dx) for f in fs]).T
-        q = 1 / (dx_f @ np.linalg.inv(np.diag(self.mean_activity)) @ dx_f.T)
-        self._cr_bound = q
+        dx_f = np.array([derivative(f, x0=x, dx=dx) for f in self._fs]).T
+        self._cr_bound = _calc_q(dx_f, self.mean_activity)
 
     def readout(self, iterations=100, weight_func=None, S=0.001, mu=0.002):
         if weight_func is None:
@@ -96,6 +94,23 @@ class PopCode():
     @property
     def cr_bound(self):
         return self._cr_bound
+
+
+@jit(nopython=True, cache=True)
+def _calc_q(dx_f, mean_activity):
+    q = dx_f @ np.linalg.inv(np.diag(mean_activity)) @ np.transpose(dx_f)
+    return 1 / q
+
+
+def derivative(func, x0, dx, args=()):
+    """1st derivative (order=3) based on `scipy.misc.derivative`"""
+    weights = np.array([-1, 0, 1]) / 2.0
+    val = 0.0
+    order = 3
+    ho = 1
+    for k in range(order):
+        val += weights[k] * func(x0 + (k - ho)*dx, *args)
+    return val / dx
 
 
 class RecurrentPopCode(PopCode):
@@ -186,13 +201,11 @@ class KalmanBasisNetwork:
         else:
             f_c = np.ones(self._N)
 
-        for i in range(self._N):
-            idx = self._idx[i]
-            S_d = [self._all_inputs[d].activity[idx[d]]
-                   for d in range(self._D)]
-            # TODO: multiple motor commands...
-            # print(self._h[i], self._lambda, S_d)
-            self._activity[i] = self._h[i] * f_c[i] + np.dot(self._lambda, S_d)
+        # TODO: allow input activities of different lengths
+        # (Numba doesn't like a list of ndarrays passed to calc_activity)
+        input_activities = np.vstack([inp.activity for inp in self._all_inputs])
+        self._activity = _calc_activity(self._N, self._idx, input_activities,
+                                        self._h, f_c, self._lambda, self._D)
 
         Q = [self._all_inputs[d].cr_bound for d in range(self._D)]
 
@@ -281,7 +294,7 @@ class KalmanBasisNetwork:
         return np.copy(self._w)
 
 
-@jit(nopython=True)#, parallel=True)#cache=True)
+@jit(nopython=True, cache=True)
 def _calc_h(w, act, mu, eta):
     u = w @ act
     usq = u ** 2
@@ -290,7 +303,7 @@ def _calc_h(w, act, mu, eta):
     return h
 
 
-@jit(nopython=True)#, parallel=True, cache=True)
+@jit(nopython=True, cache=True)
 def _set_weights(prefs, K_w, L, D, N, pairs):
     w = np.zeros((N, N))
     for i, j in pairs:
@@ -299,6 +312,18 @@ def _set_weights(prefs, K_w, L, D, N, pairs):
         w[i, j] = np.exp(K_w * w_raw)
     w = w.T
     return w
+
+@jit(nopython=True, cache=True)
+def _calc_activity(N, idxs, input_activities, h, f_c, lambda_, D):
+    #print(N.dtype, idxs.dtype, type(inputs), h.dtype, f_c.dtype, lambda_.dtype)
+    act = np.zeros(N, dtype=np.float64)
+    d = np.arange(D)
+    for i in range(N):
+        idx = idxs[i]
+        S_d = np.diag(input_activities[:, idx[d]])
+        # TODO: multiple motor commands...
+        act[i] = h[i] * f_c[i] + np.dot(lambda_, S_d)[0]
+    return act
 
 
 class KalmanFilter:

@@ -3,6 +3,8 @@ import neurkal.utils as utils
 from itertools import product
 from math import exp
 
+from numba import jit, jitclass
+from numba import int32, float32
 import numpy as np
 from scipy.misc import derivative
 from scipy.integrate import quad
@@ -149,6 +151,7 @@ class KalmanBasisNetwork:
         # indices for referring to input units
         self._idx = np.array(np.meshgrid(*[range(n) for n in shape]))
         self._idx = self._idx.T.reshape(-1, self._D + self._C)
+        self._pairs = tuple(product(range(self._N), repeat=2))
         # self._prefs contains actual preferences
         self._set_prefs()
         self._h = np.zeros(self._N)
@@ -217,31 +220,16 @@ class KalmanBasisNetwork:
 
     def _calc_h(self):
         # normalized activation function for each unit
-        self._calc_u()
-        for i in range(self._N):
-            self._h[i] = self._usq[i] / self._u_den
-
-    def _calc_u(self):
-        # raw activation for each unit
-        u = np.zeros(self._N)
-        for i, j in product(range(self._N), repeat=2):
-            u[i] += self._w[i, j] * self._activity[j]
-        self._usq = u ** 2
-        self._u_den = self._mu + self._eta * np.sum(self._usq)
+        self._h = _calc_h(self._w, self._activity,
+                          self._mu, self._eta)
 
     def set_weights(self, K_w, L, readout=False):
-        self._w = np.zeros((self._N, self._N))
         if not self._C and not readout:
             prefs = np.ones((self._N, 2))
             prefs[:, 0] = self._prefs.T
         else:
             prefs = self._prefs
-        for i, j in product(range(self._N), repeat=2):
-            # print('L: ', L, ', prefs: ', prefs[i])
-            dx_d = (L @ prefs[i]) - self._prefs[j][:self._D]
-            w_raw = np.sum(np.cos(np.deg2rad(dx)) for dx in dx_d) - self._D
-            self._w[i, j] = np.exp(K_w * w_raw)
-        self._w = self._w.T
+        self._w = _set_weights(prefs, K_w, L, self._D, self._N, self._pairs)
 
     def _set_prefs(self):
         self._prefs = np.zeros((self._N, self._D + self._C))
@@ -291,6 +279,26 @@ class KalmanBasisNetwork:
     @property
     def weights(self):
         return np.copy(self._w)
+
+
+@jit(nopython=True)#, parallel=True)#cache=True)
+def _calc_h(w, act, mu, eta):
+    u = w @ act
+    usq = u ** 2
+    u_den = mu + eta * np.sum(usq)
+    h = usq / u_den
+    return h
+
+
+@jit(nopython=True)#, parallel=True, cache=True)
+def _set_weights(prefs, K_w, L, D, N, pairs):
+    w = np.zeros((N, N))
+    for i, j in pairs:
+        dx_d = (L @ prefs[i]) - prefs[j][:D]
+        w_raw = np.sum(np.cos(np.deg2rad(dx_d))) - D
+        w[i, j] = np.exp(K_w * w_raw)
+    w = w.T
+    return w
 
 
 class KalmanFilter:

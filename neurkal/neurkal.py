@@ -3,8 +3,7 @@ import neurkal.utils as utils
 from itertools import product
 from math import exp
 
-from numba import jit, jitclass
-from numba import int32, float32
+from numba import jit
 import numpy as np
 from scipy.integrate import quad
 
@@ -35,8 +34,9 @@ class PopCode():
             space = (-180, 180)
             # assume preferred stimuli are evenly spaced across range
         self._prefs = np.linspace(*space, n)
-        self._fs = [(lambda x_i: (lambda x_: self.act_func(x_, x_i)))(x_i)
-                    for x_i in self.prefs]
+        fs = [(lambda x_i: (lambda x_: self.act_func(x_, x_i)))(x_i)
+              for x_i in self.prefs]
+        self._ds = [get_derivative(f) for f in fs]
 
         try:
             # should be a function taking input and preferred input
@@ -66,7 +66,7 @@ class PopCode():
         return len(self._prefs)
 
     def _calc_cr_bound(self, x, dx=0.01):
-        dx_f = np.array([derivative(f, x0=x, dx=dx) for f in self._fs]).T
+        dx_f = np.array([d(x0=x, dx=dx) for d in self._ds]).T
         self._cr_bound = _calc_q(dx_f, self.mean_activity)
 
     def readout(self, iterations=100, weight_func=None, S=0.001, mu=0.002):
@@ -96,21 +96,22 @@ class PopCode():
         return self._cr_bound
 
 
-@jit(nopython=True, cache=True)
+#@jit(nopython=True, cache=True)
 def _calc_q(dx_f, mean_activity):
     q = dx_f @ np.linalg.inv(np.diag(mean_activity)) @ np.transpose(dx_f)
     return 1 / q
 
 
-def derivative(func, x0, dx, args=()):
-    """1st derivative (order=3) based on `scipy.misc.derivative`"""
+def get_derivative(f):
     weights = np.array([-1, 0, 1]) / 2.0
-    val = 0.0
-    order = 3
-    ho = 1
-    for k in range(order):
-        val += weights[k] * func(x0 + (k - ho)*dx, *args)
-    return val / dx
+    steps = np.arange(3) - 1
+
+    @jit(nopython=True)
+    def derivative(x0, dx):
+        """1st derivative (order=3) based on `scipy.misc.derivative`"""
+        val = np.dot(weights, f(x0 + steps * dx))
+        return val / dx
+    return derivative
 
 
 class RecurrentPopCode(PopCode):
@@ -203,22 +204,18 @@ class KalmanBasisNetwork:
 
         # TODO: allow input activities of different lengths
         # (Numba doesn't like a list of ndarrays passed to calc_activity)
-        input_activities = np.vstack([inp.activity for inp in self._all_inputs])
-        self._activity = _calc_activity(self._N, self._idx, input_activities,
+        input_acts = np.vstack([inp.activity for inp in self._all_inputs])
+        self._activity = _calc_activity(self._N, self._idx, input_acts,
                                         self._h, f_c, self._lambda, self._D)
 
-        Q = [self._all_inputs[d].cr_bound for d in range(self._D)]
+        Q = np.diag([self._all_inputs[d].cr_bound for d in range(self._D)])
 
         if estimate:
-            self._inputs[:-1, :] = self._inputs[1:, :]
-            self._inputs[-1, :] = [inp._x for inp in self._all_inputs]
+            # self._inputs[:-1, :] = self._inputs[1:, :]
+            # self._inputs[-1, :] = [inp._x for inp in self._all_inputs]
 
-            self._estimates[:-1, :] = self._estimates[1:, :]
+            # self._estimates[:-1, :] = self._estimates[1:, :]
             self._estimates[-1, :] = self.readout()
-
-            # self._sigma = np.nansum((self._estimates - self._inputs) ** 2,
-            #                          axis=0)
-            # self._sigma /= (self._n_var - 1)
             gain = self._sigma @ np.linalg.inv(self._sigma @ Q)
             gain_sub = self._I - gain
             self._sigma = self._M @ (gain_sub @ self._sigma @ gain_sub.T
@@ -229,7 +226,6 @@ class KalmanBasisNetwork:
             # update sensory gains
             for d in range(self._D):
                 self._lambda[d] = self._sigma[d] / Q[d]
-                #self._lambda[d] = 0.001
 
     def _calc_h(self):
         # normalized activation function for each unit
@@ -294,7 +290,7 @@ class KalmanBasisNetwork:
         return np.copy(self._w)
 
 
-@jit(nopython=True, cache=True)
+#@jit(nopython=True, cache=True)
 def _calc_h(w, act, mu, eta):
     u = w @ act
     usq = u ** 2
@@ -303,7 +299,7 @@ def _calc_h(w, act, mu, eta):
     return h
 
 
-@jit(nopython=True, cache=True)
+#@jit(nopython=True, cache=True)
 def _set_weights(prefs, K_w, L, D, N, pairs):
     w = np.zeros((N, N))
     for i, j in pairs:
@@ -313,9 +309,8 @@ def _set_weights(prefs, K_w, L, D, N, pairs):
     w = w.T
     return w
 
-@jit(nopython=True, cache=True)
+#@jit(nopython=True, cache=True)
 def _calc_activity(N, idxs, input_activities, h, f_c, lambda_, D):
-    #print(N.dtype, idxs.dtype, type(inputs), h.dtype, f_c.dtype, lambda_.dtype)
     act = np.zeros(N, dtype=np.float64)
     d = np.arange(D)
     for i in range(N):

@@ -3,6 +3,7 @@ import neurkal.utils as utils
 from itertools import product
 from math import exp
 
+import numba as nb
 from numba import jit
 import numpy as np
 from scipy.integrate import quad
@@ -25,18 +26,17 @@ class PopCode():
 
         self.act_func = act_func
         self.dist = np.vectorize(dist)
-        self.activity = np.zeros(n, dtype=np.float64)
-        self.mean_activity = np.zeros(n)
-        self.noise = np.zeros(n)
+        self._activity = np.zeros(n, dtype=np.float64)
+        self._mean_activity = np.zeros(n)
+        self._noise = np.zeros(n)
 
         if space is None:
             # assume 360 deg periodic coverage in each dimension
             space = (-180, 180)
-            # assume preferred stimuli are evenly spaced across range
+        # assume preferred stimuli are evenly spaced across range
         self._prefs = np.linspace(*space, n)
-        fs = [(lambda x_i: (lambda x_: self.act_func(x_, x_i)))(x_i)
-              for x_i in self.prefs]
-        self._ds = [get_derivative(f) for f in fs]
+        act_func = nb.jit(act_func)
+        self._ds = [get_derivative(act_func, x_i) for x_i in self._prefs]
 
         try:
             # should be a function taking input and preferred input
@@ -50,24 +50,25 @@ class PopCode():
     def __call__(self, x, cr_bound=True, certain=False):
         # TODO: better naming? e.g. activity changes with recurrent connections
         # but mean_activity and noise are based on input
-        self.mean_activity = self._act_func(x)
+        self._mean_activity = self._act_func(x)
         self._x = x
         if certain:
-            self.activity = self.mean_activity
-            self.noise = np.zeros_like(self.activity)
+            self._activity = self._mean_activity
+            self._noise = np.zeros_like(self._activity)
             # self._cr_bound = 1
         else:
-            self.activity = self.dist(self.mean_activity).astype(np.float64)
-            self.noise = self.activity - self.mean_activity
+            self._activity = self.dist(self._mean_activity).astype(np.float64)
+            self._noise = self._activity - self._mean_activity
         self._calc_cr_bound(x)
-        return self.activity
+        return self._activity
 
     def __len__(self):
         return len(self._prefs)
 
     def _calc_cr_bound(self, x, dx=0.01):
-        dx_f = np.array([d(x0=x, dx=dx) for d in self._ds]).T
-        self._cr_bound = _calc_q(dx_f, self.mean_activity)
+        test= [d(x0=x, dx=dx) for d in self._ds]
+        dx_f = np.array(test).T
+        self._cr_bound = _calc_q(dx_f, self._mean_activity)
 
     def readout(self, iterations=100, weight_func=None, S=0.001, mu=0.002):
         if weight_func is None:
@@ -76,16 +77,16 @@ class PopCode():
         recnet = RecurrentPopCode(weight_func=weight_func, mu=mu, S=S,
                                   n=len(self._prefs),
                                   act_func=self.act_func, dist=self.dist)
-        recnet.activity = np.copy(self.activity)
+        recnet._activity = np.copy(self._activity)
         for _ in range(iterations):
             recnet.step()
 
         # center of mass estimate
-        com = utils.arg_popvector(self.activity, self._prefs)
+        com = utils.arg_popvector(self._activity, self._prefs)
         return com
 
     def clear(self):
-        self.activity = np.zeros_like(self._prefs)
+        self._activity = np.zeros_like(self._prefs)
 
     @property
     def prefs(self):
@@ -95,21 +96,32 @@ class PopCode():
     def cr_bound(self):
         return self._cr_bound
 
+    @property
+    def activity(self):
+        return self._activity
 
-#@jit(nopython=True, cache=True)
+    @property
+    def mean_activity(self):
+        return self._mean_activity
+
+    @property
+    def noise(self):
+        return self._noise
+
+
+@jit(nopython=True, cache=True)
 def _calc_q(dx_f, mean_activity):
     q = dx_f @ np.linalg.inv(np.diag(mean_activity)) @ np.transpose(dx_f)
     return 1 / q
 
-
-def get_derivative(f):
+def get_derivative(f, x_i):
     weights = np.array([-1, 0, 1]) / 2.0
     steps = np.arange(3) - 1
-
-    @jit(nopython=True)
+    #f = nb.jit(f)
+    @jit(nopython=True, cache=True)
     def derivative(x0, dx):
         """1st derivative (order=3) based on `scipy.misc.derivative`"""
-        val = np.dot(weights, f(x0 + steps * dx))
+        val = np.dot(weights, f(x=x0 + steps * dx, x_i=x_i))
         return val / dx
     return derivative
 
@@ -141,9 +153,9 @@ class RecurrentPopCode(PopCode):
         self._w = self._weight_func(*np.indices(shape))
 
     def step(self):
-        u = self._w @ self.activity.T
+        u = self._w @ self._activity.T
         u_sq = u ** 2
-        self.activity = u_sq / (self._S + self._mu * np.sum(u_sq))
+        self._activity = u_sq / (self._S + self._mu * np.sum(u_sq))
 
 
 class KalmanBasisNetwork:
@@ -290,7 +302,7 @@ class KalmanBasisNetwork:
         return np.copy(self._w)
 
 
-#@jit(nopython=True, cache=True)
+@jit(nopython=True, cache=True)
 def _calc_h(w, act, mu, eta):
     u = w @ act
     usq = u ** 2
@@ -299,7 +311,7 @@ def _calc_h(w, act, mu, eta):
     return h
 
 
-#@jit(nopython=True, cache=True)
+@jit(nopython=True, cache=True)
 def _set_weights(prefs, K_w, L, D, N, pairs):
     w = np.zeros((N, N))
     for i, j in pairs:
@@ -309,7 +321,8 @@ def _set_weights(prefs, K_w, L, D, N, pairs):
     w = w.T
     return w
 
-#@jit(nopython=True, cache=True)
+
+@jit(nopython=True, cache=True)
 def _calc_activity(N, idxs, input_activities, h, f_c, lambda_, D):
     act = np.zeros(N, dtype=np.float64)
     d = np.arange(D)

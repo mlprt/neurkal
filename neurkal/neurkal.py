@@ -36,7 +36,7 @@ class PopCode():
         # assume preferred stimuli are evenly spaced across range
         self._prefs = np.linspace(*space, n)
         act_func = nb.jit(act_func)
-        self._ds = [get_derivative(act_func, x_i) for x_i in self._prefs]
+        self._ds = _get_derivatives_func(act_func, self._prefs)
 
         try:
             # should be a function taking input and preferred input
@@ -55,7 +55,6 @@ class PopCode():
         if certain:
             self._activity = self._mean_activity
             self._noise = np.zeros_like(self._activity)
-            # self._cr_bound = 1
         else:
             self._activity = self.dist(self._mean_activity).astype(np.float64)
             self._noise = self._activity - self._mean_activity
@@ -66,8 +65,7 @@ class PopCode():
         return len(self._prefs)
 
     def _calc_cr_bound(self, x, dx=0.01):
-        test= [d(x0=x, dx=dx) for d in self._ds]
-        dx_f = np.array(test).T
+        dx_f = self._ds(x0=x, dx=dx)
         self._cr_bound = _calc_q(dx_f, self._mean_activity)
 
     def readout(self, iterations=100, weight_func=None, S=0.001, mu=0.002):
@@ -114,16 +112,15 @@ def _calc_q(dx_f, mean_activity):
     q = dx_f @ np.linalg.inv(np.diag(mean_activity)) @ np.transpose(dx_f)
     return 1 / q
 
-def get_derivative(f, x_i):
-    weights = np.array([-1, 0, 1]) / 2.0
-    steps = np.arange(3) - 1
-    #f = nb.jit(f)
+def _get_derivatives_func(f, prefs):
+    weights = np.array([-0.5, 0, 0.5])
+    steps = utils.colvec(np.arange(3) - 1)
     @jit(nopython=True, cache=True)
-    def derivative(x0, dx):
+    def derivatives(x0, dx):
         """1st derivative (order=3) based on `scipy.misc.derivative`"""
-        val = np.dot(weights, f(x=x0 + steps * dx, x_i=x_i))
+        val = weights @ f(x0 + steps * dx, prefs)
         return val / dx
-    return derivative
+    return derivatives
 
 
 class RecurrentPopCode(PopCode):

@@ -15,7 +15,7 @@ class PopCode():
         * non-Poisson CR bounds
     """
 
-    def __init__(self, n, act_func, dist, space=None):
+    def __init__(self, n, act_func, dist, space=None, ds=None):
         """
         Args:
             shape: Network dimensions.
@@ -29,14 +29,17 @@ class PopCode():
         self._activity = np.zeros(n, dtype=np.float64)
         self._mean_activity = np.zeros(n)
         self._noise = np.zeros(n)
+        self._space = space
 
         if space is None:
             # assume 360 deg periodic coverage in each dimension
             space = (-180, 180)
         # assume preferred stimuli are evenly spaced across range
         self._prefs = np.linspace(*space, n)
-        act_func = nb.jit(act_func)
-        self._ds = _get_derivatives_func(act_func, self._prefs)
+        if ds is None:
+            act_func = nb.jit(act_func)
+            ds = _get_derivatives_func(act_func, self._prefs)
+        self._ds = ds
 
         try:
             # should be a function taking input and preferred input
@@ -72,9 +75,8 @@ class PopCode():
         if weight_func is None:
             weight_func = utils.gaussian_filter(p=len(self._prefs), K_w=1,
                                                 delta=0.7)
-        recnet = RecurrentPopCode(weight_func=weight_func, mu=mu, S=S,
-                                  n=len(self._prefs),
-                                  act_func=self.act_func, dist=self.dist)
+        recnet = RecurrentPopCode.from_popcode(self, weight_func=weight_func,
+                                               mu=mu, S=S)
         recnet._activity = np.copy(self._activity)
         for _ in range(iterations):
             recnet.step()
@@ -89,6 +91,10 @@ class PopCode():
     @property
     def prefs(self):
         return self._prefs
+
+    @property
+    def space(self):
+        return self._space
 
     @property
     def cr_bound(self):
@@ -117,9 +123,8 @@ def _get_derivatives_func(f, prefs):
     steps = utils.colvec(np.arange(3) - 1)
     @jit(nopython=True, cache=True)
     def derivatives(x0, dx):
-        """1st derivative (order=3) based on `scipy.misc.derivative`"""
-        val = weights @ f(x0 + steps * dx, prefs)
-        return val / dx
+        dfs = weights @ f(x0 + steps * dx, prefs)
+        return dfs / dx
     return derivatives
 
 
@@ -144,6 +149,12 @@ class RecurrentPopCode(PopCode):
 
         self._S = S
         self._mu = mu
+
+    @classmethod
+    def from_popcode(cls, popcode, weight_func, mu, S):
+        return cls(weight_func=weight_func, mu=mu, S=S, ds=popcode._ds,
+                   n=len(popcode._prefs), act_func=popcode.act_func,
+                   dist=popcode.dist, space=popcode.space, *args, **kwargs)
 
     def set_weights(self):
         shape = [self._prefs.shape[0]] * 2

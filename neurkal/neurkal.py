@@ -193,7 +193,7 @@ class KalmanBasisNetwork:
         if sigma is None:
             sigma = np.eye(self._D)
         self._sigma = sigma
-        self._lambda = np.eye(self._D)  # TODO: prior gains?
+        self._lambda = np.ones(self._D)  # TODO: prior gains?
         self._I = np.eye(self._D)
         self._h = np.zeros(self._N)
         self._activity = np.zeros(self._N)
@@ -225,25 +225,21 @@ class KalmanBasisNetwork:
 
         # calculate new activities
         if self._C:
-            f_c = [self._all_inputs[self._D].activity[self._idx[i, self._D]]
-                   for i in range(self._N)]
+            # TODO: multiple motor commands
+            f_c = self._all_inputs[self._D].activity[self._idx[:, self._D]]
         else:
             f_c = np.ones(self._N)
 
         # TODO: allow input activities of different lengths
         # (Numba doesn't like a list of ndarrays passed to calc_activity)
         input_acts = np.vstack([inp.activity for inp in self._all_inputs])
-        self._activity = _calc_activity(self._N, self._idx, input_acts,
-                                        self._h, f_c, self._lambda, self._d)
+        self._activity = _calc_activity(self._idx, input_acts,
+                                        self._h, f_c, self._lambda)
 
         Q = np.diag([self._all_inputs[d].cr_bound for d in range(self._D)])
 
         if estimate:
-            # self._inputs[:-1, :] = self._inputs[1:, :]
-            # self._inputs[-1, :] = [inp._x for inp in self._all_inputs]
-
-            # self._estimates[:-1, :] = self._estimates[1:, :]
-            self._estimates[-1, :] = self.readout()
+            self._estimate = self.readout()
             gain = self._sigma @ np.linalg.inv(self._sigma @ Q)
             gain_sub = self._I - gain
             self._sigma = self._M @ (gain_sub @ self._sigma @ gain_sub.T
@@ -253,7 +249,7 @@ class KalmanBasisNetwork:
 
             # update sensory gains
             for d in range(self._D):
-                self._lambda[d] = self._sigma[d] / Q[d]
+                self._lambda[d] = self._sigma[d, d] / Q[d, d]
 
     def _calc_h(self):
         # normalized activation function for each unit
@@ -262,8 +258,8 @@ class KalmanBasisNetwork:
 
     def set_weights(self, K_w, L):
         if not self._C:
-            prefs = np.ones((self._N, 2))
-            prefs[:, 0] = self._prefs.T
+            prefs = np.ones((self._N, self._D + 1))
+            prefs[:, :-1] = self._prefs
         else:
             prefs = self._prefs
         self._w = _set_weights(prefs, K_w, L, self._D, self._N, self._pairs)
@@ -311,7 +307,7 @@ class KalmanBasisNetwork:
 
     @property
     def estimate(self):
-        return np.copy(self._estimates[-1])
+        return np.copy(self._estimate)
 
     @property
     def weights(self):
@@ -320,8 +316,7 @@ class KalmanBasisNetwork:
 
 @njit(cache=True)
 def _calc_h(w, act, mu, eta):
-    u = w @ act
-    usq = u ** 2
+    usq = (w @ act) ** 2
     u_den = mu + eta * np.sum(usq)
     h = usq / u_den
     return h
@@ -340,11 +335,11 @@ def _set_weights(prefs, K_w, L, D, N, pairs):
 
 
 #@njit(cache=True)
-def _calc_activity(N, idxs, input_activities, h, f_c, lambda_, d):
-    n = np.arange(N)
-    idx = np.diag(idxs[n][:, d])
-    S_d = input_activities[:, idx]
-    act = np.dot(h, f_c) + np.dot(lambda_, S_d)
+def _calc_activity(idxs, input_activities, h, f_c, lambda_):
+    #
+    S = np.transpose(np.transpose(input_activities)[idxs].diagonal(axis1=1,
+                                                                   axis2=2))
+    act = h * f_c + np.dot(lambda_, S)
     return act
 
 

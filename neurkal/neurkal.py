@@ -4,9 +4,8 @@ from itertools import product
 from math import exp
 
 import numba as nb
-from numba import jit
+from numba import njit
 import numpy as np
-from scipy.integrate import quad
 
 
 class PopCode():
@@ -26,6 +25,7 @@ class PopCode():
 
         self.act_func = act_func
         self.dist = np.vectorize(dist)
+        self._weight_func = None
         self._activity = np.zeros(n, dtype=np.float64)
         self._mean_activity = np.zeros(n)
         self._noise = np.zeros(n)
@@ -71,11 +71,12 @@ class PopCode():
         dx_f = self._ds(x0=x, dx=dx)
         self._cr_bound = _calc_q(dx_f, self._mean_activity)
 
-    def readout(self, iterations=100, weight_func=None, S=0.001, mu=0.002):
-        if weight_func is None:
-            weight_func = utils.gaussian_filter(p=len(self._prefs), K_w=1,
-                                                delta=0.7)
-        recnet = RecurrentPopCode.from_popcode(self, weight_func=weight_func,
+    def readout(self, iterations=15, weight_func=None, S=0.001, mu=0.002):
+        if weight_func is None and self._weight_func is None:
+            self._weight_func = utils.gaussian_filter(p=len(self._prefs),
+                                                      K_w=1, delta=0.7)
+        recnet = RecurrentPopCode.from_popcode(self,
+                                               weight_func=self._weight_func,
                                                mu=mu, S=S)
         recnet._activity = np.copy(self._activity)
         for _ in range(iterations):
@@ -113,15 +114,17 @@ class PopCode():
         return self._noise
 
 
-@jit(nopython=True, cache=True)
+@njit(cache=True)
 def _calc_q(dx_f, mean_activity):
-    q = dx_f @ np.linalg.inv(np.diag(mean_activity)) @ np.transpose(dx_f)
+    q = dx_f @ np.diag(1 / mean_activity) @ np.transpose(dx_f)
     return 1 / q
+
 
 def _get_derivatives_func(f, prefs):
     weights = np.array([-0.5, 0, 0.5])
     steps = utils.colvec(np.arange(3) - 1)
-    @jit(nopython=True, cache=True)
+
+    @njit(cache=True)
     def derivatives(x0, dx):
         dfs = weights @ f(x0 + steps * dx, prefs)
         return dfs / dx
@@ -134,24 +137,17 @@ class RecurrentPopCode(PopCode):
        * weight_func same number of dimensions as pop code (1D only currently)
     """
 
-    def __init__(self, weight_func, mu, S=0.001, normalize=False,
+    def __init__(self, weight_func, mu, S=1e-6, normalize=False,
                  *args, **kwargs):
         super().__init__(*args, **kwargs)
-        if normalize:
-            # TODO: fix? does not do what I expected...
-            bounds = np.min(self._prefs), np.max(self._prefs)
-            integral = quad(lambda j: weight_func(0.0, j), *bounds)[0]
-        else:
-            integral = 1.0
-        weight_func_ = lambda i, j: weight_func(i, j) / integral
-        self._weight_func = np.vectorize(weight_func_)
+        self._weight_func = weight_func
         self.set_weights()
 
         self._S = S
         self._mu = mu
 
     @classmethod
-    def from_popcode(cls, popcode, weight_func, mu, S):
+    def from_popcode(cls, popcode, weight_func, mu, S=1e-6, *args, **kwargs):
         return cls(weight_func=weight_func, mu=mu, S=S, ds=popcode._ds,
                    n=len(popcode._prefs), act_func=popcode.act_func,
                    dist=popcode.dist, space=popcode.space, *args, **kwargs)
@@ -161,9 +157,15 @@ class RecurrentPopCode(PopCode):
         self._w = self._weight_func(*np.indices(shape))
 
     def step(self):
-        u = self._w @ self._activity.T
-        u_sq = u ** 2
-        self._activity = u_sq / (self._S + self._mu * np.sum(u_sq))
+        self._activity = _popcode_calc_activity(self._w, self._activity,
+                                                self._S, self._mu)
+
+
+@njit(cache=True)
+def _popcode_calc_activity(w, activity, S, mu):
+    u_sq = (w @ np.transpose(activity)) ** 2
+    updated = u_sq / (S + mu * np.sum(u_sq))
+    return updated
 
 
 class KalmanBasisNetwork:
@@ -177,7 +179,7 @@ class KalmanBasisNetwork:
 
         TODO:
             * prevent blowups/failures due to bad sensory estimates
-
+            * clean up __init__?
         """
         self._D, self._C = len(sensory_inputs), len(motor_inputs)
         self._M, self._B, self._Z = np.array(M), np.array(B), np.array(Z)
@@ -204,8 +206,13 @@ class KalmanBasisNetwork:
         # divisive normalization parameters
         self._mu = mu
         self._eta = eta
+
+        # lateral weights, including weights for readout
         self._K_w = K_w
         self.set_weights(K_w, L=np.hstack([M, B]))  # (mu, eta)
+        self._readout_weights = _set_weights(self._prefs, self._K_w,
+                                             np.eye(self._D + self._C),
+                                             self._D, self._N, self._pairs)
 
     def update(self, estimate=True, first=False):
         """
@@ -252,8 +259,8 @@ class KalmanBasisNetwork:
         self._h = _calc_h(self._w, self._activity,
                           self._mu, self._eta)
 
-    def set_weights(self, K_w, L, readout=False):
-        if not self._C and not readout:
+    def set_weights(self, K_w, L):
+        if not self._C:
             prefs = np.ones((self._N, 2))
             prefs[:, 0] = self._prefs.T
         else:
@@ -274,7 +281,7 @@ class KalmanBasisNetwork:
         self.readout_activity = np.zeros((iterations, self._N))
         self.readout_activity[0, :] = self._activity
         # converge on D-dim. stable manifold
-        self.set_weights(self._K_w, L=np.eye(self._D + self._C), readout=True)
+        self._weights = self._readout_weights
         for i in range(iterations):
             self.update(estimate=False)
             self.readout_activity[i, :] = self._activity
@@ -310,7 +317,7 @@ class KalmanBasisNetwork:
         return np.copy(self._w)
 
 
-@jit(nopython=True, cache=True)
+@njit(cache=True)
 def _calc_h(w, act, mu, eta):
     u = w @ act
     usq = u ** 2
@@ -319,10 +326,11 @@ def _calc_h(w, act, mu, eta):
     return h
 
 
-@jit(nopython=True, cache=True)
+@njit(cache=True)
 def _set_weights(prefs, K_w, L, D, N, pairs):
     w = np.zeros((N, N))
-    for i, j in pairs:
+    for k in range(len(pairs)):
+        i, j = pairs[k]
         dx_d = (L @ prefs[i]) - prefs[j][:D]
         w_raw = np.sum(np.cos(np.deg2rad(dx_d))) - D
         w[i, j] = np.exp(K_w * w_raw)
@@ -330,7 +338,7 @@ def _set_weights(prefs, K_w, L, D, N, pairs):
     return w
 
 
-@jit(nopython=True, cache=True)
+@njit(cache=True)
 def _calc_activity(N, idxs, input_activities, h, f_c, lambda_, D):
     act = np.zeros(N, dtype=np.float64)
     d = np.arange(D)

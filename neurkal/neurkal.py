@@ -339,16 +339,12 @@ def _set_weights(prefs, K_w, L, D, N, pairs):
     return w
 
 
-@njit(cache=True)
+#@njit(cache=True)
 def _calc_activity(N, idxs, input_activities, h, f_c, lambda_, d):
-    act = np.zeros(N, dtype=np.float64)
-    # n = np.arange(N)
-    # S_d = np.diag(input_activities[:, idxs[n][:, d]])
-    # act = np.dot(h, f_c) + np.dot(lambda_, S_d)
-    for i in range(N):
-        S_d = np.diag(input_activities[:, idxs[i][d]])
-        # TODO: multiple motor commands...
-        act[i] = h[i] * f_c[i] + np.dot(lambda_, S_d)[0]
+    n = np.arange(N)
+    idx = np.diag(idxs[n][:, d])
+    S_d = input_activities[:, idx]
+    act = np.dot(h, f_c) + np.dot(lambda_, S_d)
     return act
 
 

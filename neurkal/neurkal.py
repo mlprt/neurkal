@@ -24,7 +24,8 @@ class PopCode():
         """
 
         self.act_func = act_func
-        self.dist = np.vectorize(dist)
+        self._act_func = njit(act_func)
+        self.dist = dist
         self._weight_func = None
         self._activity = np.zeros(n, dtype=np.float64)
         self._mean_activity = np.zeros(n)
@@ -37,8 +38,7 @@ class PopCode():
         # assume preferred stimuli are evenly spaced across range
         self._prefs = np.linspace(*space, n)
         if ds is None:
-            act_func = nb.jit(act_func)
-            ds = _get_derivatives_func(act_func, self._prefs)
+            ds = _get_derivatives_func(self._act_func, self._prefs)
         self._ds = ds
 
         try:
@@ -47,13 +47,10 @@ class PopCode():
         except TypeError:
             raise TypeError("`act` not a function with 2 inputs and 1 output")
 
-        # TODO: multiple dimensions
-        self._act_func = lambda x: np.vectorize(self.act_func)(x, self._prefs)
-
     def __call__(self, x, cr_bound=True, certain=False):
         # TODO: better naming? e.g. activity changes with recurrent connections
         # but mean_activity and noise are based on input
-        self._mean_activity = self._act_func(x)
+        self._mean_activity = self._act_func(x, self._prefs)
         self._x = x
         if certain:
             self._activity = self._mean_activity
@@ -181,27 +178,31 @@ class KalmanBasisNetwork:
             * prevent blowups/failures due to bad sensory estimates
             * clean up __init__?
         """
-        self._D, self._C = len(sensory_inputs), len(motor_inputs)
-        self._M, self._B, self._Z = np.array(M), np.array(B), np.array(Z)
         self._all_inputs = sensory_inputs + motor_inputs
+        self._D, self._C = len(sensory_inputs), len(motor_inputs)
+        self._d = np.arange(self._D)
+        self._M, self._B, self._Z = np.array(M), np.array(B), np.array(Z)
+
         shape = [len(l) for l in self._all_inputs]
         self._N = np.prod(shape)
         # indices for referring to input units
         self._idx = np.array(np.meshgrid(*[range(n) for n in shape]))
         self._idx = self._idx.T.reshape(-1, self._D + self._C)
         self._pairs = tuple(product(range(self._N), repeat=2))
-        # self._prefs contains actual preferences
-        self._set_prefs()
-        self._h = np.zeros(self._N)
+
         if sigma is None:
             sigma = np.eye(self._D)
         self._sigma = sigma
         self._lambda = np.eye(self._D)  # TODO: prior gains?
         self._I = np.eye(self._D)
+        self._h = np.zeros(self._N)
         self._activity = np.zeros(self._N)
         self._estimates = np.full((n_var, self._D), np.nan)
         self._inputs = np.full((n_var, self._D), np.nan)
         self._n_var = n_var
+
+        # self._prefs contains actual preferences
+        self._set_prefs()
 
         # divisive normalization parameters
         self._mu = mu
@@ -233,7 +234,7 @@ class KalmanBasisNetwork:
         # (Numba doesn't like a list of ndarrays passed to calc_activity)
         input_acts = np.vstack([inp.activity for inp in self._all_inputs])
         self._activity = _calc_activity(self._N, self._idx, input_acts,
-                                        self._h, f_c, self._lambda, self._D)
+                                        self._h, f_c, self._lambda, self._d)
 
         Q = np.diag([self._all_inputs[d].cr_bound for d in range(self._D)])
 
@@ -339,12 +340,13 @@ def _set_weights(prefs, K_w, L, D, N, pairs):
 
 
 @njit(cache=True)
-def _calc_activity(N, idxs, input_activities, h, f_c, lambda_, D):
+def _calc_activity(N, idxs, input_activities, h, f_c, lambda_, d):
     act = np.zeros(N, dtype=np.float64)
-    d = np.arange(D)
+    # n = np.arange(N)
+    # S_d = np.diag(input_activities[:, idxs[n][:, d]])
+    # act = np.dot(h, f_c) + np.dot(lambda_, S_d)
     for i in range(N):
-        idx = idxs[i]
-        S_d = np.diag(input_activities[:, idx[d]])
+        S_d = np.diag(input_activities[:, idxs[i][d]])
         # TODO: multiple motor commands...
         act[i] = h[i] * f_c[i] + np.dot(lambda_, S_d)[0]
     return act

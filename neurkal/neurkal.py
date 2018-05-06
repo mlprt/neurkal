@@ -190,12 +190,15 @@ class KalmanBasisNetwork:
         self._idx = np.array(np.meshgrid(*[range(n) for n in shape]))
         self._idx = self._idx.T.reshape(-1, self._D + self._C)
         self._pairs = np.array(list(product(range(self._N), repeat=2)))
+        # TODO: different input network lengths
+        self._input_acts = np.zeros((shape[0], self._D))
 
         if sigma is None:
             sigma = np.eye(self._D)
         self._sigma = np.array(sigma, dtype=np.float64)
         self._lambda = np.ones(self._D)  # TODO: prior gains?
         self._I = np.eye(self._D, dtype=np.float64)
+        self._f_c_default = np.ones(self._N)
         self._h = np.zeros(self._N)
         self._activity = np.zeros(self._N)
         self._estimates = np.full((n_var, self._D), np.nan)
@@ -230,19 +233,17 @@ class KalmanBasisNetwork:
             # TODO: multiple motor commands
             f_c = self._all_inputs[self._D].activity[self._idx[:, self._D]]
         else:
-            f_c = np.ones(self._N)
+            f_c = self._f_c_default
 
         # TODO: allow input activities of different lengths
         # (Numba doesn't like a list of ndarrays passed to calc_activity)
-        ia = [inp.activity for inp in self._all_inputs]
-        input_acts = np.vstack(ia)
-        input_acts = input_acts.transpose()
-        input_acts = input_acts[self._idx]
-        S = input_acts.diagonal(axis1=1, axis2=2)
+        for i, inp in enumerate(self._all_inputs):
+            self._input_acts[:, i] = inp.activity
+        S = self._input_acts[self._idx].diagonal(axis1=1, axis2=2)
         self._activity = _calc_activity(S, self._h, f_c, self._lambda)
 
         Q = [self._all_inputs[d].cr_bound for d in range(self._D)]
-        Q = np.diag(Q)
+        Q = self._I * Q  # alternative to np.diag(Q)
 
         if estimate:
             self._estimate = self.readout()

@@ -3,8 +3,7 @@ import neurkal.utils as utils
 from itertools import product
 from math import exp
 
-import numba as nb
-from numba import njit
+from numba import njit, prange
 import numpy as np
 
 
@@ -113,7 +112,7 @@ class PopCode():
 
 @njit(cache=True)
 def _calc_q(dx_f, mean_activity):
-    q = dx_f @ np.diag(1 / mean_activity) @ np.transpose(dx_f)
+    q = dx_f @ np.diag(1 / mean_activity) @ dx_f.transpose()
     return 1 / q
 
 
@@ -160,7 +159,7 @@ class RecurrentPopCode(PopCode):
 
 @njit(cache=True)
 def _popcode_calc_activity(w, activity, S, mu):
-    u_sq = (w @ np.transpose(activity)) ** 2
+    u_sq = (w @ activity.transpose()) ** 2
     updated = u_sq / (S + mu * np.sum(u_sq))
     return updated
 
@@ -181,20 +180,22 @@ class KalmanBasisNetwork:
         self._all_inputs = sensory_inputs + motor_inputs
         self._D, self._C = len(sensory_inputs), len(motor_inputs)
         self._d = np.arange(self._D)
-        self._M, self._B, self._Z = np.array(M), np.array(B), np.array(Z)
+        self._M = np.array(M, dtype=np.float64)
+        self._B = np.array(B, dtype=np.float64)
+        self._Z = np.array(Z, dtype=np.float64)
 
         shape = [len(l) for l in self._all_inputs]
         self._N = np.prod(shape)
         # indices for referring to input units
         self._idx = np.array(np.meshgrid(*[range(n) for n in shape]))
         self._idx = self._idx.T.reshape(-1, self._D + self._C)
-        self._pairs = tuple(product(range(self._N), repeat=2))
+        self._pairs = np.array(list(product(range(self._N), repeat=2)))
 
         if sigma is None:
             sigma = np.eye(self._D)
-        self._sigma = sigma
+        self._sigma = np.array(sigma, dtype=np.float64)
         self._lambda = np.ones(self._D)  # TODO: prior gains?
-        self._I = np.eye(self._D)
+        self._I = np.eye(self._D, dtype=np.float64)
         self._h = np.zeros(self._N)
         self._activity = np.zeros(self._N)
         self._estimates = np.full((n_var, self._D), np.nan)
@@ -221,7 +222,8 @@ class KalmanBasisNetwork:
             * Pass new state vector
         """
         # update activation function
-        self._calc_h()
+        self._h = _calc_h(self._w, self._activity,
+                          self._mu, self._eta)
 
         # calculate new activities
         if self._C:
@@ -232,29 +234,23 @@ class KalmanBasisNetwork:
 
         # TODO: allow input activities of different lengths
         # (Numba doesn't like a list of ndarrays passed to calc_activity)
-        input_acts = np.vstack([inp.activity for inp in self._all_inputs])
-        self._activity = _calc_activity(self._idx, input_acts,
-                                        self._h, f_c, self._lambda)
+        ia = [inp.activity for inp in self._all_inputs]
+        input_acts = np.vstack(ia)
+        input_acts = input_acts.transpose()
+        input_acts = input_acts[self._idx]
+        S = input_acts.diagonal(axis1=1, axis2=2)
+        self._activity = _calc_activity(S, self._h, f_c, self._lambda)
 
-        Q = np.diag([self._all_inputs[d].cr_bound for d in range(self._D)])
+        Q = [self._all_inputs[d].cr_bound for d in range(self._D)]
+        Q = np.diag(Q)
 
         if estimate:
             self._estimate = self.readout()
-            gain = self._sigma @ np.linalg.inv(self._sigma @ Q)
-            gain_sub = self._I - gain
-            self._sigma = self._M @ (gain_sub @ self._sigma @ gain_sub.T
-                                     + gain @ Q @ gain.T)
-            self._sigma = self._sigma @ self._M.T
-            self._sigma += self._Z
+            self._sigma = _calc_sigma(self._sigma, Q, self._I, self._M,
+                                      self._Z)
 
             # update sensory gains
-            for d in range(self._D):
-                self._lambda[d] = self._sigma[d, d] / Q[d, d]
-
-    def _calc_h(self):
-        # normalized activation function for each unit
-        self._h = _calc_h(self._w, self._activity,
-                          self._mu, self._eta)
+            self._lambda = _calc_lambda(self._sigma, Q)
 
     def set_weights(self, K_w, L):
         if not self._C:
@@ -323,9 +319,24 @@ def _calc_h(w, act, mu, eta):
 
 
 @njit(cache=True)
+def _calc_sigma(sigma, Q, I, M, Z):
+    gain = sigma @ np.linalg.inv(sigma @ Q)
+    gain_sub = I - gain
+    sigma = M @ (gain_sub @ sigma @ gain_sub.transpose()
+                 + gain @ Q @ gain.transpose()) @ M.transpose() + Z
+    return sigma
+
+
+@njit(cache=True)
+def _calc_lambda(sigma, Q):
+    lambda_ = np.diag(sigma / Q)
+    return lambda_
+
+
+@njit(cache=True)
 def _set_weights(prefs, K_w, L, D, N, pairs):
     w = np.zeros((N, N))
-    for k in range(len(pairs)):
+    for k in prange(len(pairs)):
         i, j = pairs[k]
         dx_d = (L @ prefs[i]) - prefs[j][:D]
         w_raw = np.sum(np.cos(np.deg2rad(dx_d))) - D
@@ -334,12 +345,10 @@ def _set_weights(prefs, K_w, L, D, N, pairs):
     return w
 
 
-#@njit(cache=True)
-def _calc_activity(idxs, input_activities, h, f_c, lambda_):
-    #
-    S = np.transpose(np.transpose(input_activities)[idxs].diagonal(axis1=1,
-                                                                   axis2=2))
-    act = h * f_c + np.dot(lambda_, S)
+@njit(cache=True)
+def _calc_activity(S, h, f_c, lambda_):
+    # TODO: how slow is transpose? use row format anyway?
+    act = h * f_c + np.dot(lambda_, S.transpose())
     return act
 
 

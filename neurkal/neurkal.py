@@ -1,3 +1,6 @@
+"""
+"""
+
 import neurkal.utils as utils
 
 from itertools import product
@@ -8,37 +11,47 @@ import numpy as np
 
 
 class PopCode():
-    """
+    """A 1D population of neurons capable of coding a probability distribution.
+
     TODO:
-        * non-Poisson CR bounds
+        * non-Poisson stuff
+        * non-periodic readout
+        * better solution for ds (don't clone?)
     """
 
     def __init__(self, n, act_func, dist, space=None, ds=None):
         """
         Args:
-            shape: Network dimensions.
-            space: Range of preferred inputs for each dimension.
-            act: Activity function, giving average unit rate for an input.
+            n: Number of units/"neurons".
+            act_func: Activity function, giving average unit rate for an input.
+                First argument is unit input, second is unit preferred input.
             dist: Unit activity distribution given average activity.
+            space: Range of preferred inputs.
+                Unit preferences will be uniformly placed over this range.
+            ds: Returns derivatives of act_func for each unit.
+                (Used to prevent recompilation by Numba on cloning.)
         """
-
-        self.act_func = act_func
-        self._act_func = njit(act_func)
-        self.dist = dist
-        self._weight_func = None
-        self._activity = np.zeros(n, dtype=np.float64)
-        self._mean_activity = np.zeros(n)
-        self._noise = np.zeros(n)
-        self._space = space
-
         if space is None:
             # assume 360 deg periodic coverage in each dimension
             space = (-180, 180)
         # assume preferred stimuli are evenly spaced across range
+
+        self.act_func = act_func
+        self._act_func = njit(act_func)
+        self.dist = dist
+        self._space = space
+
         self._prefs = np.linspace(*space, n)
         if ds is None:
             ds = _get_derivatives_func(self._act_func, self._prefs)
         self._ds = ds
+
+        self._activity = np.zeros(n, dtype=np.float64)
+        self._mean_activity = np.zeros(n)
+        self._noise = np.zeros(n)
+
+        # for readout
+        self._weight_func = None
 
         try:
             # should be a function taking input and preferred input
@@ -68,6 +81,11 @@ class PopCode():
         self._cr_bound = _calc_q(dx_f, self._mean_activity)
 
     def readout(self, iterations=15, weight_func=None, S=0.001, mu=0.002):
+        """Return maximum likelihood estimate of activity maximum.
+
+        Uses recursive connections to converge activity onto a smooth hill
+        (stable manifold), then read out the peak as a population vector.
+        """
         if weight_func is None and self._weight_func is None:
             self._weight_func = utils.gaussian_filter(p=len(self._prefs),
                                                       K_w=1, delta=0.7)
@@ -128,13 +146,17 @@ def _get_derivatives_func(f, prefs):
 
 
 class RecurrentPopCode(PopCode):
-    """
-    TODO:
-       * weight_func same number of dimensions as pop code (1D only currently)
+    """Population code with recurrent connections and divisive normalization.
     """
 
-    def __init__(self, weight_func, mu, S=1e-6, normalize=False,
-                 *args, **kwargs):
+    def __init__(self, weight_func, mu, S=1e-6, *args, **kwargs):
+        """
+        Args:
+            weight_func: Returns lateral weights given two index arrays.
+            mu (float): Divisive normalization scaling parameter.
+            S (float): Divisive normalization constant parameter.
+                Defaults to very low value to avoid division by zero.
+        """
         super().__init__(*args, **kwargs)
         self._weight_func = weight_func
         self.set_weights()
@@ -165,13 +187,15 @@ def _popcode_calc_activity(w, activity, S, mu):
 
 
 class KalmanBasisNetwork:
+    """Basis function network covering an arbitrary number of input `PopCode`s.
+    """
 
     def __init__(self, sensory_inputs, motor_inputs, M, B, Z, K_w=3, mu=0.001,
-                 eta=0.002, sigma=None, n_var=10):
+                 eta=0.002, sigma=None):
         """
         Args:
-            sensory_inputs (PopCode):
-            motor_inputs (PopCode):
+            sensory_inputs (List[PopCode]): Sensory variable codes.
+            motor_inputs (List[PopCode]): Motor variable codes.
 
         TODO:
             * prevent blowups/failures due to bad sensory estimates
@@ -197,16 +221,15 @@ class KalmanBasisNetwork:
             sigma = np.eye(self._D)
         self._sigma = np.array(sigma, dtype=np.float64)
         self._lambda = np.ones(self._D)  # TODO: prior gains?
-        self._I = np.eye(self._D, dtype=np.float64)
-        self._f_c_default = np.ones(self._N)
-        self._h = np.zeros(self._N)
-        self._activity = np.zeros(self._N)
-        self._estimates = np.full((n_var, self._D), np.nan)
-        self._inputs = np.full((n_var, self._D), np.nan)
-        self._n_var = n_var
+
+        #self._h = np.zeros(self._N)
+        #self._n_var = n_var
 
         # self._prefs contains actual preferences
         self._set_prefs()
+
+        # initialize activity
+        self.clear()
 
         # divisive normalization parameters
         self._mu = mu
@@ -218,6 +241,10 @@ class KalmanBasisNetwork:
         self._readout_weights = _set_weights(self._prefs, self._K_w,
                                              np.eye(self._D + self._C),
                                              self._D, self._N, self._pairs)
+
+        # useful constants for calculations
+        self._I = np.eye(self._D, dtype=np.float64)
+        self._f_c_default = np.ones(self._N)
 
     def update(self, estimate=True, first=False):
         """
@@ -289,6 +316,9 @@ class KalmanBasisNetwork:
         self._activity = activity
 
         return com
+
+    def clear(self):
+        self._activity = np.zeros(self._N)
 
     @property
     def activity(self):
@@ -411,36 +441,63 @@ class KalmanFilter:
         return self._sigma
 
 
-class StateDynamics:
-    def __init__(self, M, B, Z, x0=None):
+class LinearDynamics:
+    """Manage the evolution of a linear dynamical system with noise.
+    """
+
+    _noise_dist_err = "noise_dist takes two arguments, mean and covariance/std"
+
+    def __init__(self, M, B, Z, x0=None, noise_dist=None):
+        """
+        Args:
+        """
+        # dynamical parameter matrices
         try:
             np.hstack([M, B])
         except ValueError:
             raise ValueError("Matrices M and B have different number of rows")
 
-        # dynamical parameter matrices
         self._M = np.array(M)
         self._B = np.array(B)
 
-        self._mu = np.zeros(self._M.shape[1])  # noise mean (0)
-        # noise covariance matrix
-        self._Z = Z
+        # make sure noise distribution is well-behaved and configure parameters
+        if noise_dist is None:
+            noise_dist = np.random.multivariate_normal
+            mu = np.array([0.0])
+        else:
+            try:
+                if not noise_dist(0, 0) == 0:
+                    raise TypeError()
+                mu = 0
+                Z = np.ravel(Z)[0]
+
+            except ValueError:
+                if not noise_dist([0], [[0]]) == 1:
+                    raise TypeError(LinearDynamics._noise_dist_err)
+                mu = np.zeros(M.shape[1])
+
+            except TypeError:
+                raise TypeError(LinearDynamics._noise_dist_err)
+
+        self._mu = mu  # noise mean (0)
+        self._Z = Z  # noise covariance
+        self._noise_dist = noise_dist  # noise distribution
 
         self._x = np.zeros((self._M.shape[1], 1))  # state vector
 
         if x0 is not None:
-            try:
-                self._x[:] = x0
-            except ValueError:
-                raise ValueError("Initial state vector is wrong length")
+            self.initialize(x0)
 
     def update(self, c):
-        noise = utils.colvec(np.random.multivariate_normal(self._mu, self._Z))
+        noise = utils.colvec(self._noise_dist(self._mu, self._Z))
         self._x = self._M @ self._x + self._B @ c + noise
+
+    def initialize(self, x0):
+        try:
+            self._x[:] = x0
+        except ValueError:
+            raise ValueError("Initial state vector is wrong length")
 
     @property
     def x(self):
         return self._x
-
-    def change(self, x):
-        self._x = x
